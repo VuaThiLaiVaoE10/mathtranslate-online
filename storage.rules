@@ -1,0 +1,36 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function isValidArtifact(fileName) {
+      return fileName.size() >= 5
+        && fileName.size() <= 128
+        && fileName.matches('^[A-Za-z0-9._-]+\\.(tex|zip|pdf)$')
+        && request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= 50 * 1024 * 1024
+        && request.resource.contentType is string
+        && request.resource.contentType.size() <= 128
+        && request.resource.contentType.matches('^(text/plain|text/x-tex|application/x-tex|application/pdf|application/zip|application/x-zip-compressed|application/octet-stream)(;.*)?$')
+        && (
+          request.resource.metadata == null
+          || request.resource.metadata.size() == 0
+        );
+    }
+
+    match /users/{userId}/jobs/{jobId}/{fileName} {
+      allow read, delete: if isOwner(userId) && jobId.size() >= 1 && jobId.size() <= 128;
+      allow create, update: if isOwner(userId)
+        && jobId.size() >= 1
+        && jobId.size() <= 128
+        && isValidArtifact(fileName);
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
