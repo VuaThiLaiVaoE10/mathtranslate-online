@@ -74,3 +74,13 @@ Mọi thay đổi trong `mathtranslate_v2/` so với mã nguồn chuẩn `refere
 |---|---|---|
 | `mathtranslate/utils.py`, `mathtranslate/pdf_compiler.py`, `web/app.py`, `gui/controller.py` | Gộp chung `parse_language_options`, `normalize_arxiv_id`, `compile_zip_to_pdf` về lõi dùng chung; Web UI nhận được cả link arXiv đầy đủ (`https://arxiv.org/abs/...`) và ép `threads=1` cho `tencent`; `cleanup_expired_jobs` bỏ qua job đang `running`/`queued` | Xóa ~80 dòng code trùng lặp giữa Web/GUI, đồng nhất hành vi nhận link arXiv và bảo vệ job chạy lâu. |
 | `mathtranslate/engines/gemini_engine.py`, `google_engine.py`, `translate.py` | Bỏ `params={"key": ...}` trên URL Gemini (chỉ gửi header `x-goog-api-key`); nối chuỗi lỗi fallback `raise ... from primary_exc`; đóng `HTTPError.close()` (RAII) | Chặn lộ API key trong log lỗi HTTP, giữ nguyên nguyên nhân lỗi gốc và đạt `0 Warning` dưới `python -W error` trên Python 3.14. |
+
+---
+
+## Giai đoạn PDF-M1 — Dịch PDF Giữ Nguyên Định Dạng, Bảo vệ Công thức & Kiểm định Ảnh
+
+| File trong `mathtranslate_v2/` | Điểm khác biệt so với `reference/` | Lý do |
+|---|---|---|
+| `mathtranslate/pdf_doc.py` | Bổ sung pipeline dịch trực tiếp file `.pdf` (`EN -> VI`): phân loại trang `TEXT/SCAN/MIXED` (cấm tự chạy OCR trên `SCAN`), sắp xếp thứ tự đọc đa cột, bảo vệ công thức 3 lớp (font toán/MathType/PUA `0xE000..0xF8FF`/vector), gộp request NMT bằng `XMATHXSEP`, xoá chữ gốc không đụng hình/vector (`PDF_REDACT_IMAGE_NONE` + `PDF_REDACT_LINE_ART_NONE`), nhúng subset font `Times New Roman`/`Arial`/`Consolas` qua `insert_htmlbox`, tự co chữ chống tràn + gắn cờ trang, giữ nguyên TOC/links/metadata | Repo `reference/` gốc không có tính năng dịch trực tiếp PDF (phải qua Mathpix trả phí); bản `pdf2zh` trước đó làm vỡ ký tự MathType PUA và trộn font tiếng Việt. |
+| `mathtranslate/pdf_qa.py` | Bổ sung bộ kiểm định bắt buộc sau dịch: khớp số trang, khớp/bảo toàn số ảnh, 0 rò rỉ placeholder (`{v0}`, `XMATHX`), kiểm tra dấu tiếng Việt, đo độ tương đồng pixel (`1 - MAE`) vùng công thức độc lập và xuất ảnh PNG đối chiếu song song (Trái: Gốc / Phải: Dịch) | Đảm bảo kiểm chứng tự động + trực quan trước khi báo hoàn thành. |
+| `pyproject.toml` & `tests/test_pdf_m1.py` | Thêm optional dep `pdf = ["pymupdf>=1.25"]`, CLI `translate_pdf` và 5 bài kiểm thử tự động `test_pdf_m1.py` | Cho phép chạy độc lập và kiểm thử đầy đủ `PDF-M1`. |

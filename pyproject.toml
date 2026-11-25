@@ -19,10 +19,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 web = ["flask>=3.0"]
+pdf = ["pymupdf>=1.25"]
 
 [project.scripts]
 translate_tex = "mathtranslate.translate_tex:main"
 translate_arxiv = "mathtranslate.translate_arxiv:main"
+translate_pdf = "mathtranslate.pdf_doc:main"
 mathtranslate-web = "web.app:run_server"
 mathtranslate-gui = "gui.app:run_gui"
 
