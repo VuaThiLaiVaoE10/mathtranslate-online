@@ -29,6 +29,9 @@ COMPILE_PDF_KEY = "DEFAULT_COMPILE_PDF"
 COMMANDS_FILE_KEY = "DEFAULT_COMMANDS_FILE"
 
 
+_UNSET = object()
+
+
 class QueueWriter:
     """Thread-safe file-like stream writer that pushes lines into a ``queue.Queue``.
 
@@ -44,8 +47,8 @@ class QueueWriter:
         self.stream_name = stream_name
         self._lock = threading.Lock()
         self._buffer = ""
-        self._prev_stdout = None
-        self._prev_stderr = None
+        self._prev_stdout: object = _UNSET
+        self._prev_stderr: object = _UNSET
 
     def writable(self) -> bool:
         return True
@@ -87,12 +90,12 @@ class QueueWriter:
         try:
             self.flush()
         finally:
-            if self._prev_stdout is not None:
-                sys.stdout = self._prev_stdout
-                self._prev_stdout = None
-            if self._prev_stderr is not None:
-                sys.stderr = self._prev_stderr
-                self._prev_stderr = None
+            if self._prev_stdout is not _UNSET:
+                sys.stdout = self._prev_stdout  # type: ignore[assignment]
+                self._prev_stdout = _UNSET
+            if self._prev_stderr is not _UNSET:
+                sys.stderr = self._prev_stderr  # type: ignore[assignment]
+                self._prev_stderr = _UNSET
 
 
 def _read_path_preserving_spaces(key: str, default: str = "") -> str:

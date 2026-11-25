@@ -93,15 +93,9 @@ def safe_extract_tar(tar_path, dest_dir):
     dest_real = os.path.realpath(dest_dir)
     with tarfile.open(tar_path, mode='r') as tf:
         for member in tf.getmembers():
-            target_path = _validate_archive_member_path(member.name, dest_real)
             if member.issym() or member.islnk():
-                base_dir = os.path.dirname(target_path) if member.issym() else dest_real
-                link_norm = member.linkname.replace("\\", "/")
-                if link_norm.startswith("/") or (len(link_norm) >= 2 and link_norm[1] == ":"):
-                    raise ValueError(f"Unsafe archive link target: {member.linkname!r}")
-                link_target = os.path.realpath(os.path.join(base_dir, link_norm))
-                if os.path.commonpath([dest_real, link_target]) != dest_real:
-                    raise ValueError(f"Archive link escapes destination directory: {member.linkname!r}")
+                raise ValueError(f"Unsafe link in tar archive: {member.name!r}")
+            _validate_archive_member_path(member.name, dest_real)
         if hasattr(tarfile, 'data_filter'):
             tf.extractall(dest_real, filter='data')
         else:

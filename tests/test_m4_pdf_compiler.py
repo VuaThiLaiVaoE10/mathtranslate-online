@@ -27,7 +27,8 @@ def test_build_language_preamble_vietnamese_win32():
     preamble = build_language_preamble("vi", platform="win32")
     assert preamble == (
         "\\usepackage{fontspec}\n"
-        "\\usepackage[vietnamese]{babel}\n"
+        "\\usepackage[bidi=default]{babel}\n"
+        "\\babelprovide[import,main]{vietnamese}\n"
         "\\setmainfont{Times New Roman}\n"
         "\\usepackage{amsmath}"
     )
@@ -38,11 +39,13 @@ def test_build_language_preamble_vietnamese_non_windows():
     preamble = build_language_preamble("VI", platform="linux")
     assert preamble == (
         "\\usepackage{fontspec}\n"
-        "\\usepackage[vietnamese]{babel}\n"
+        "\\usepackage[bidi=default]{babel}\n"
+        "\\babelprovide[import,main]{vietnamese}\n"
         "\\setmainfont{DejaVu Serif}\n"
         "\\usepackage{amsmath}"
     )
     assert "xeCJK" not in preamble
+    assert "\\setmainfont{Times New Roman}" in build_language_preamble("vi", platform="darwin")
 
 
 @pytest.mark.parametrize("lang", ["en", "fr", "de", "es"])
@@ -56,7 +59,7 @@ def test_build_default_begin_vi_and_cjk():
     vi_begin = build_default_begin("vi", platform="win32")
     assert r"\documentclass[UTF8]{article}" in vi_begin
     assert r"\usepackage{fontspec}" in vi_begin
-    assert r"\usepackage[vietnamese]{babel}" in vi_begin
+    assert r"\babelprovide[import,main]{vietnamese}" in vi_begin
     assert r"\setmainfont{Times New Roman}" in vi_begin
     assert r"\usepackage{amsmath}" in vi_begin
     assert r"\usepackage{amssymb}" in vi_begin

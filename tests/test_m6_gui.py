@@ -79,6 +79,18 @@ def test_queue_writer_restores_streams_on_exception():
     assert sys.stderr is orig_stderr
     assert _drain_queue(log_q) == ["before error"]
 
+    # pythonw.exe starts with sys.stdout / sys.stderr == None; ensure None is restored
+    sys.stdout = None  # type: ignore[assignment]
+    sys.stderr = None  # type: ignore[assignment]
+    try:
+        with QueueWriter(log_q):
+            print("under pythonw")
+        assert sys.stdout is None
+        assert sys.stderr is None
+    finally:
+        sys.stdout = orig_stdout
+        sys.stderr = orig_stderr
+
 
 def test_parse_language_options_has_required_languages_and_count():
     options = parse_language_options()

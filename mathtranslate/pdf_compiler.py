@@ -36,11 +36,12 @@ def build_language_preamble(l_to: str, platform: str | None = None) -> str:
         return "\\usepackage{xeCJK}\n\\usepackage{amsmath}"
 
     if lang == "vi":
-        target_platform = sys.platform if platform is None else platform
-        font_name = "Times New Roman" if target_platform.lower() == "win32" else "DejaVu Serif"
+        target_platform = (sys.platform if platform is None else platform).lower()
+        font_name = "Times New Roman" if target_platform in ("win32", "darwin") else "DejaVu Serif"
         return (
             "\\usepackage{fontspec}\n"
-            "\\usepackage[vietnamese]{babel}\n"
+            "\\usepackage[bidi=default]{babel}\n"
+            "\\babelprovide[import,main]{vietnamese}\n"
             f"\\setmainfont{{{font_name}}}\n"
             "\\usepackage{amsmath}"
         )
