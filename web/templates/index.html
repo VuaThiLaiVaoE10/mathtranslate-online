@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MathTranslate — LaTeX Mathematical Paper Translator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="masthead">
+        <div class="container masthead-inner">
+            <div class="masthead-brand">
+                <h1 class="brand-title">MathTranslate</h1>
+                <p class="brand-subtitle">Local LaTeX workbench for math-preserving academic translation</p>
+            </div>
+            <div class="masthead-meta">
+                <span class="meta-pill">v{{ version }}</span>
+                <span class="meta-pill">Localhost</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="container workspace">
+        <section class="panel panel-controls" aria-labelledby="controls-heading">
+            <div class="panel-header">
+                <h2 id="controls-heading" class="panel-title">Translation Parameters</h2>
+                <p class="panel-caption">Preserve equations, environments, and formatting macros.</p>
+            </div>
+
+            <div class="mode-tabs" role="tablist" aria-label="Translation input mode">
+                <button
+                    type="button"
+                    class="mode-tab is-active"
+                    role="tab"
+                    id="tab-arxiv"
+                    data-mode="arxiv"
+                    aria-selected="true"
+                    aria-controls="panel-mode-arxiv"
+                >ArXiv ID</button>
+                <button
+                    type="button"
+                    class="mode-tab"
+                    role="tab"
+                    id="tab-tex"
+                    data-mode="tex"
+                    aria-selected="false"
+                    aria-controls="panel-mode-tex"
+                >File .tex</button>
+                <button
+                    type="button"
+                    class="mode-tab"
+                    role="tab"
+                    id="tab-zip"
+                    data-mode="zip"
+                    aria-selected="false"
+                    aria-controls="panel-mode-zip"
+                >Project .zip</button>
+            </div>
+
+            <form id="translate-form" class="translate-form" novalidate>
+                <div id="panel-mode-arxiv" class="mode-panel" role="tabpanel" aria-labelledby="tab-arxiv">
+                    <div class="field">
+                        <label for="arxiv-id" class="field-label">arXiv Identifier</label>
+                        <input
+                            type="text"
+                            id="arxiv-id"
+                            name="arxiv_id"
+                            class="input-control input-mono"
+                            placeholder="2403.08441 or hep-th/9901001"
+                            autocomplete="off"
+                            spellcheck="false"
+                        >
+                        <p class="field-hint">Downloads LaTeX source directly from arXiv and packages the translated project as a .zip archive.</p>
+                    </div>
+                </div>
+
+                <div id="panel-mode-tex" class="mode-panel" role="tabpanel" aria-labelledby="tab-tex" hidden>
+                    <div class="field">
+                        <label for="tex-file" class="field-label">Single LaTeX Source (.tex)</label>
+                        <div class="dropzone" data-dropzone="tex" tabindex="0" role="button" aria-label="Select or drop a .tex file">
+                            <input type="file" id="tex-file" name="tex_file" accept=".tex" class="sr-only">
+                            <span class="dropzone-action">Choose .tex file</span>
+                            <span class="dropzone-name" id="tex-filename">or drop a file here</span>
+                        </div>
+                        <p class="field-hint">Translates prose while protecting math expressions, commands, and formatting macros.</p>
+                    </div>
+                </div>
+
+                <div id="panel-mode-zip" class="mode-panel" role="tabpanel" aria-labelledby="tab-zip" hidden>
+                    <div class="field">
+                        <label for="zip-file" class="field-label">Multi-File Project Archive (.zip)</label>
+                        <div class="dropzone" data-dropzone="zip" tabindex="0" role="button" aria-label="Select or drop a .zip archive">
+                            <input type="file" id="zip-file" name="zip_file" accept=".zip" class="sr-only">
+                            <span class="dropzone-action">Choose .zip archive</span>
+                            <span class="dropzone-name" id="zip-filename">or drop an archive here</span>
+                        </div>
+                        <p class="field-hint">Safely extracts the project, merges linked \input files, translates main documents, and repacks a .zip.</p>
+                    </div>
+                </div>
+
+                <hr class="section-divider">
+
+                <div class="field">
+                    <label for="engine" class="field-label">Translation Engine</label>
+                    <select id="engine" name="engine" class="input-control">
+                        {% for eng in engines %}
+                        <option value="{{ eng }}" {% if eng == default_engine %}selected{% endif %}>{{ eng }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="lang-grid">
+                    <div class="field">
+                        <label for="l-from" class="field-label">Source Language</label>
+                        <select id="l-from" name="l_from" class="input-control">
+                            {% for lang in languages %}
+                            <option value="{{ lang.code }}" {% if lang.code == default_l_from %}selected{% endif %}>
+                                {{ lang.name }} ({{ lang.code }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+
+                    <div class="lang-swap-wrap">
+                        <button type="button" id="swap-lang-btn" class="btn-icon" title="Swap source and target languages" aria-label="Swap source and target languages">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                <path d="M3 5.5H13M13 5.5L10.5 3M13 5.5L10.5 8M13 10.5H3M3 10.5L5.5 8M3 10.5L5.5 13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="field">
+                        <label for="l-to" class="field-label">Target Language</label>
+                        <select id="l-to" name="l_to" class="input-control">
+                            {% for lang in languages %}
+                            <option value="{{ lang.code }}" {% if lang.code == default_l_to %}selected{% endif %}>
+                                {{ lang.name }} ({{ lang.code }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+
+                <div class="checkbox-field">
+                    <input type="checkbox" id="compile-pdf" name="compile_pdf" class="checkbox-input">
+                    <label for="compile-pdf" class="checkbox-label">
+                        <span class="checkbox-title">Auto-compile PDF with XeLaTeX</span>
+                        <span class="checkbox-hint">Requires local TeX Live or MiKTeX. If unavailable, translated LaTeX files are still delivered.</span>
+                    </label>
+                </div>
+
+                <div id="form-error" class="alert alert-error" role="alert" hidden></div>
+
+                <button type="submit" id="submit-btn" class="btn-primary">
+                    Start Translation
+                </button>
+            </form>
+        </section>
+
+        <section class="panel panel-status" id="status-panel" data-state="idle" aria-labelledby="status-heading" aria-live="polite">
+            <div class="panel-header status-header">
+                <div>
+                    <h2 id="status-heading" class="panel-title">Job Output &amp; Artifacts</h2>
+                    <p class="panel-caption" id="job-meta-caption">Ready for a new translation task.</p>
+                </div>
+                <div class="status-badges">
+                    <span id="job-id-badge" class="mono-badge" hidden></span>
+                    <span id="status-pill" class="status-pill status-idle">
+                        <span class="status-dot" aria-hidden="true"></span>
+                        <span id="status-pill-text">Idle</span>
+                    </span>
+                </div>
+            </div>
+
+            <div id="state-idle" class="state-block state-idle">
+                <p class="idle-lead">Select a source mode on the left and start a job to monitor live translation output here.</p>
+                <dl class="idle-specs">
+                    <div class="spec-row">
+                        <dt>ArXiv ID</dt>
+                        <dd>Fetches the paper source tarball from arXiv, translates complete documents, and returns an Overleaf-ready .zip archive.</dd>
+                    </div>
+                    <div class="spec-row">
+                        <dt>Single .tex</dt>
+                        <dd>Preserves equations, references, and formatting macros such as <code>\textbf</code> and <code>\emph</code>.</dd>
+                    </div>
+                    <div class="spec-row">
+                        <dt>Project .zip</dt>
+                        <dd>Validates archive entries against path traversal before merging and translating multi-file projects.</dd>
+                    </div>
+                </dl>
+                <p class="idle-footnote">Note: For manual PDF builds on Overleaf, set the compiler to <code>XeLaTeX</code> for Vietnamese and CJK support.</p>
+            </div>
+
+            <div id="state-running" class="state-block" hidden>
+                <div class="banner banner-running">
+                    <div class="banner-title">Translation in progress</div>
+                    <div class="banner-body" id="running-summary">Queued for worker execution.</div>
+                </div>
+            </div>
+
+            <div id="state-done" class="state-block" hidden>
+                <div class="banner banner-success">
+                    <div class="banner-title">Translation completed</div>
+                    <div class="banner-body" id="done-summary">Artifacts are ready for download below.</div>
+                </div>
+
+                <div id="pdf-notice" class="notice-box" hidden></div>
+
+                <div class="downloads-section">
+                    <h3 class="sub-heading">Generated Files</h3>
+                    <ul id="download-list" class="download-list"></ul>
+                </div>
+            </div>
+
+            <div id="state-error" class="state-block" hidden>
+                <div class="banner banner-error" role="alert">
+                    <div class="banner-title">Translation failed</div>
+                    <div class="banner-body" id="error-summary">An unexpected error occurred.</div>
+                </div>
+            </div>
+
+            <div id="log-container" class="log-container" hidden>
+                <div class="log-toolbar">
+                    <span class="sub-heading">Execution Log</span>
+                    <button type="button" id="copy-log-btn" class="btn-subtle">Copy Log</button>
+                </div>
+                <pre id="job-log" class="log-console"></pre>
+            </div>
+        </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+</body>
+</html>
