@@ -868,3 +868,52 @@ body {
     font-weight: 600;
     color: var(--text-secondary);
 }
+
+.meta-pill-btn {
+    cursor: pointer;
+    background-color: var(--bg-surface);
+    color: var(--accent-primary);
+    border-color: var(--border-strong);
+    font-weight: 600;
+}
+
+.meta-pill-btn:hover {
+    background-color: var(--bg-hover);
+}
+
+.dashboard-wrap {
+    padding-top: var(--space-4);
+}
+
+.dashboard-panel {
+    margin-bottom: 0;
+}
+
+.dashboard-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+}
+
+.dashboard-grid,
+.api-keys-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
+}
+
+.dash-box {
+    padding: var(--space-3);
+    background-color: var(--bg-recessed);
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-sm);
+}
+
+@media (max-width: 768px) {
+    .dashboard-grid,
+    .api-keys-grid {
+        grid-template-columns: 1fr;
+    }
+}

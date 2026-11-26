@@ -4,33 +4,20 @@ rules_version = '2';
 // Assumed Data Model
 // ===============================================================
 //
-// This security rules file assumes the following data structures:
+// This security rules file assumes the following data structure for the
+// MathTranslate Key Dashboard:
 //
 // Collection: users
 // Document ID: {userId} (must match authenticated Firebase Auth UID, 1..128 chars)
-// Fields (all required; no extraneous fields permitted):
-//   - uid: string (required, 1..128 chars, == userId, immutable) - Owner Firebase Auth UID
-//   - defaultEngine: string (required, enum: ['google', 'tencent', 'gemini', 'openai', 'ollama', 'deepl']) - Preferred translation engine
-//   - languageFrom: string (required, 2..16 chars) - Default source language code
-//   - languageTo: string (required, 2..16 chars) - Default target language code
-//   - compilePdf: bool (required) - Default XeLaTeX PDF compilation toggle
-//   - updatedAt: timestamp (required, == request.time) - Server-authoritative last update timestamp
-//
-// Collection: jobs
-// Document ID: {jobId} (1..128 chars)
-// Fields (all required; no extraneous fields permitted):
-//   - ownerId: string (required, 1..128 chars, == request.auth.uid, immutable) - Job owner UID
-//   - mode: string (required, enum: ['arxiv', 'tex', 'zip'], immutable) - Translation input mode
-//   - sourceLabel: string (required, 1..256 chars) - Display label (arXiv ID or filename)
-//   - engine: string (required, enum: ['google', 'tencent', 'gemini', 'openai', 'ollama', 'deepl']) - Selected translation engine
-//   - lFrom: string (required, 2..16 chars) - Source language code
-//   - lTo: string (required, 2..16 chars) - Target language code
-//   - status: string (required, enum: ['queued', 'running', 'done', 'error']) - Job lifecycle state ('queued' on create; controlled state transitions on update)
-//   - compilePdf: bool (required) - Whether PDF compilation is enabled for this job
-//   - artifactCount: int (required, 0..10) - Count of generated output artifacts
-//   - errorMsg: string (required, 0..2000 chars) - Error details when failed, or empty string
-//   - createdAt: timestamp (required, == request.time on create, immutable on update) - Server creation timestamp
-//   - updatedAt: timestamp (required, == request.time) - Server last modification timestamp
+// Fields (strict schema via hasOnly; no extraneous fields permitted):
+//   - email: string (optional, 0..254 chars) - Authenticated user's email address
+//   - keysByEngine: map (optional, max 3 entries) - Per-engine API key settings
+//       Allowed keys: 'gemini', 'openai', 'deepl'
+//       Each engine entry is a map containing only optional string fields:
+//         - key1: string (optional, 0..512 chars) - Primary API key
+//         - key2: string (optional, 0..512 chars) - Secondary API key
+//         - baseUrl: string (optional, 0..512 chars) - Custom API base URL
+//   - updatedAt: timestamp or number (required, >= 0 when number) - Last update time
 //
 // ===============================================================
 
@@ -41,188 +28,95 @@ service cloud.firestore {
     // Helper Functions
     // ===============================================================
 
-    // Verify that the request comes from an authenticated user
+    // Verify that the request comes from an authenticated Firebase Auth user
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    // Verify path-based document ownership
+    // Verify path-based document ownership against the caller's Auth UID
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Verify field-based ownership for existing job documents using stored resource data
-    function isJobOwner() {
-      return isAuthenticated() && resource.data.ownerId == request.auth.uid;
-    }
-
-    // Verify uid matches authenticated caller on create
-    function uidUnchanged() {
-      return 'uid' in request.resource.data &&
-        request.resource.data.uid is string &&
-        request.resource.data.uid == request.auth.uid;
-    }
-
-    // Ensure uid field is never modified on update
-    function uidNotModified() {
-      return 'uid' in request.resource.data &&
-        request.resource.data.uid == resource.data.uid;
-    }
-
-    // Validate that all required fields exist on the incoming document
-    function hasRequiredFields(fields) {
-      return request.resource.data.keys().hasAll(fields);
-    }
-
-    // Enforce strict schema (reject any extraneous/unexpected fields)
-    function hasOnlyAllowedFields(fields) {
-      return request.resource.data.keys().hasOnly(fields);
-    }
-
-    // Ensure immutable fields have not been modified during an update
-    function areImmutableFieldsUnchanged(fields) {
-      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
-    }
-
-    // Validate string type and character length bounds on an incoming field
-    function validStringLength(field, minLen, maxLen) {
-      return request.resource.data[field] is string &&
-        request.resource.data[field].size() >= minLen &&
-        request.resource.data[field].size() <= maxLen;
-    }
-
-    // Validate document ID length bounds on write operations
+    // Validate document ID length bounds
     function isBoundedId(idVal, minLen, maxLen) {
       return idVal is string &&
         idVal.size() >= minLen &&
         idVal.size() <= maxLen;
     }
 
-    // Validate allowed translation engines
-    function isValidEngine(engine) {
-      return engine is string &&
-        engine in ['google', 'tencent', 'gemini', 'openai', 'ollama', 'deepl'];
+    // Validate that all required fields exist on the map
+    function hasRequiredFields(data, fields) {
+      return data.keys().hasAll(fields);
     }
 
-    // Validate allowed job input modes
-    function isValidJobMode(mode) {
-      return mode is string &&
-        mode in ['arxiv', 'tex', 'zip'];
+    // Enforce strict schema (reject any extraneous/unexpected fields)
+    function hasOnlyAllowedFields(data, fields) {
+      return data.keys().hasOnly(fields);
     }
 
-    // Validate allowed job statuses
-    function isValidJobStatus(status) {
-      return status is string &&
-        status in ['queued', 'running', 'done', 'error'];
+    // Validate an optional string field within a map, enforcing type and max length
+    function isValidOptionalStringInMap(mapData, field, maxLen) {
+      return !(field in mapData) ||
+        (mapData[field] is string && mapData[field].size() <= maxLen);
     }
 
-    // Enforce valid job lifecycle transitions on update
-    function isValidJobStatusTransition(prevStatus, nextStatus) {
-      return (prevStatus == 'queued' && nextStatus in ['queued', 'running', 'error']) ||
-        (prevStatus == 'running' && nextStatus in ['running', 'done', 'error']) ||
-        (prevStatus == 'error' && nextStatus in ['error', 'queued']) ||
-        (prevStatus == 'done' && nextStatus == 'done');
+    // Validate updatedAt as a Firestore timestamp or non-negative epoch number
+    function isValidTimestampOrNumber(val) {
+      return val is timestamp || (val is number && val >= 0);
     }
 
     // ===============================================================
     // Domain Validators (Applied on BOTH create and update)
     // ===============================================================
 
-    function isValidUserPreferences(data, userId) {
-      let fields = [
-        'uid',
-        'defaultEngine',
-        'languageFrom',
-        'languageTo',
-        'compilePdf',
-        'updatedAt'
-      ];
-      return hasRequiredFields(fields) &&
-        hasOnlyAllowedFields(fields) &&
-        validStringLength('uid', 1, 128) &&
-        data.uid == userId &&
-        data.uid == request.auth.uid &&
-        isValidEngine(data.defaultEngine) &&
-        validStringLength('languageFrom', 2, 16) &&
-        validStringLength('languageTo', 2, 16) &&
-        data.compilePdf is bool &&
-        data.updatedAt is timestamp &&
-        data.updatedAt == request.time;
+    // Validate a single engine entry inside keysByEngine
+    function isValidEngineKeyConfig(entry) {
+      return entry is map &&
+        entry.keys().hasOnly(['key1', 'key2', 'baseUrl']) &&
+        isValidOptionalStringInMap(entry, 'key1', 512) &&
+        isValidOptionalStringInMap(entry, 'key2', 512) &&
+        isValidOptionalStringInMap(entry, 'baseUrl', 512);
     }
 
-    function isValidJob(data) {
-      let fields = [
-        'ownerId',
-        'mode',
-        'sourceLabel',
-        'engine',
-        'lFrom',
-        'lTo',
-        'status',
-        'compilePdf',
-        'artifactCount',
-        'errorMsg',
-        'createdAt',
-        'updatedAt'
-      ];
-      return hasRequiredFields(fields) &&
-        hasOnlyAllowedFields(fields) &&
-        validStringLength('ownerId', 1, 128) &&
-        data.ownerId == request.auth.uid &&
-        isValidJobMode(data.mode) &&
-        validStringLength('sourceLabel', 1, 256) &&
-        isValidEngine(data.engine) &&
-        validStringLength('lFrom', 2, 16) &&
-        validStringLength('lTo', 2, 16) &&
-        isValidJobStatus(data.status) &&
-        data.compilePdf is bool &&
-        data.artifactCount is int &&
-        data.artifactCount >= 0 &&
-        data.artifactCount <= 10 &&
-        validStringLength('errorMsg', 0, 2000) &&
-        data.createdAt is timestamp &&
-        data.updatedAt is timestamp &&
-        data.updatedAt == request.time;
+    // Validate the keysByEngine map (only 'gemini', 'openai', 'deepl' keys allowed)
+    function isValidKeysByEngine(keysMap) {
+      return keysMap is map &&
+        keysMap.keys().hasOnly(['gemini', 'openai', 'deepl']) &&
+        keysMap.size() <= 3 &&
+        (!('gemini' in keysMap) || isValidEngineKeyConfig(keysMap.gemini)) &&
+        (!('openai' in keysMap) || isValidEngineKeyConfig(keysMap.openai)) &&
+        (!('deepl' in keysMap) || isValidEngineKeyConfig(keysMap.deepl));
+    }
+
+    // Validate the full users/{userId} document on create and update
+    function isValidUserKeyDoc(data) {
+      let allowedFields = ['email', 'keysByEngine', 'updatedAt'];
+      return data is map &&
+        hasOnlyAllowedFields(data, allowedFields) &&
+        hasRequiredFields(data, ['updatedAt']) &&
+        isValidOptionalStringInMap(data, 'email', 254) &&
+        (!('keysByEngine' in data) || isValidKeysByEngine(data.keysByEngine)) &&
+        isValidTimestampOrNumber(data.updatedAt);
     }
 
     // ===============================================================
     // Collection Rules
     // ===============================================================
 
-    // User preferences: strictly private to the authenticated owner
+    // User key dashboard document: strictly private to the authenticated owner.
+    // Single-document get/create/update/delete allowed; collection list queries denied.
     match /users/{userId} {
-      allow read, delete: if isOwner(userId);
+      allow get, delete: if isOwner(userId) && isBoundedId(userId, 1, 128);
+      allow list: if false;
 
       allow create: if isOwner(userId) &&
         isBoundedId(userId, 1, 128) &&
-        uidUnchanged() &&
-        isValidUserPreferences(request.resource.data, userId);
+        isValidUserKeyDoc(request.resource.data);
 
       allow update: if isOwner(userId) &&
         isBoundedId(userId, 1, 128) &&
-        uidNotModified() &&
-        areImmutableFieldsUnchanged(['uid']) &&
-        isValidUserPreferences(request.resource.data, userId);
-    }
-
-    // Translation jobs: strictly owned by creator; immutable ownership, mode, and creation timestamp
-    match /jobs/{jobId} {
-      allow read, delete: if isJobOwner();
-
-      allow create: if isAuthenticated() &&
-        isBoundedId(jobId, 1, 128) &&
-        isValidJob(request.resource.data) &&
-        request.resource.data.status == 'queued' &&
-        request.resource.data.createdAt == request.time;
-
-      allow update: if isJobOwner() &&
-        isBoundedId(jobId, 1, 128) &&
-        areImmutableFieldsUnchanged(['ownerId', 'createdAt', 'mode']) &&
-        request.resource.data.ownerId == resource.data.ownerId &&
-        request.resource.data.createdAt == resource.data.createdAt &&
-        request.resource.data.mode == resource.data.mode &&
-        isValidJob(request.resource.data) &&
-        isValidJobStatusTransition(resource.data.status, request.resource.data.status);
+        isValidUserKeyDoc(request.resource.data);
     }
 
     // Explicit default-deny fallback for all unmatched paths and subcollections

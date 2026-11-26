@@ -14,11 +14,59 @@
                 <p class="brand-subtitle">Local LaTeX workbench for math-preserving academic translation</p>
             </div>
             <div class="masthead-meta">
+                <button type="button" id="open-dashboard-btn" class="meta-pill meta-pill-btn">Key Dashboard / Gmail</button>
                 <span class="meta-pill">v{{ version }}</span>
-                <span class="meta-pill">Localhost</span>
+                <span class="meta-pill">Web UI</span>
             </div>
         </div>
     </header>
+
+    <section id="account-dashboard" class="container dashboard-wrap" hidden aria-label="API Key &amp; Gmail Sync Dashboard">
+        <div class="panel dashboard-panel">
+            <div class="dashboard-head">
+                <div>
+                    <h2 class="panel-title">API Key Dashboard &amp; Gmail Sync</h2>
+                    <p class="panel-caption" id="gmail-sync-status">Keys are saved automatically in this browser. Connect Firebase Google Sign-In to sync across devices via Gmail.</p>
+                </div>
+                <button type="button" id="close-dashboard-btn" class="btn-subtle">Close</button>
+            </div>
+
+            <div class="dashboard-grid">
+                <div class="dash-box">
+                    <div class="inspect-title">Browser Key Vault (Auto-saved)</div>
+                    <p id="vault-summary" class="field-hint">No API keys stored yet for this engine.</p>
+                    <div class="pdf-controls-row">
+                        <button type="button" id="vault-save-btn" class="btn-subtle">Save Current Keys</button>
+                        <button type="button" id="vault-clear-btn" class="btn-subtle btn-danger">Clear Saved Keys</button>
+                    </div>
+                </div>
+
+                <div class="dash-box">
+                    <div class="inspect-title">Gmail Account Sync (Firebase Auth)</div>
+                    <p id="gmail-user-label" class="field-hint">Not signed in.</p>
+                    <div class="pdf-controls-row">
+                        <button type="button" id="gmail-signin-btn" class="btn-subtle">Sign in with Google (Gmail)</button>
+                        <button type="button" id="gmail-sync-btn" class="btn-subtle" hidden>Sync Now</button>
+                        <button type="button" id="gmail-signout-btn" class="btn-subtle btn-danger" hidden>Sign Out</button>
+                    </div>
+                    <details class="advanced-details" style="margin-top: 8px;">
+                        <summary class="advanced-summary">Firebase Web Config JSON (for cross-device Gmail sync)</summary>
+                        <textarea
+                            id="firebase-config-input"
+                            class="input-control input-mono"
+                            rows="3"
+                            style="margin-top: 6px;"
+                            placeholder='{"apiKey": "...", "authDomain": "...", "projectId": "..."}'
+                        ></textarea>
+                        <div class="pdf-controls-row">
+                            <button type="button" id="save-fb-config-btn" class="btn-subtle">Save Config</button>
+                            <button type="button" id="clear-fb-config-btn" class="btn-subtle btn-danger">Clear Config</button>
+                        </div>
+                    </details>
+                </div>
+            </div>
+        </div>
+    </section>
 
     <main class="container workspace">
         <section class="panel panel-controls" aria-labelledby="controls-heading">
@@ -164,25 +212,43 @@
                 </div>
 
                 <div id="api-key-field" class="field" hidden>
-                    <label for="api-key" class="field-label">API Key (Gemini / OpenAI / DeepL)</label>
-                    <input
-                        type="password"
-                        id="api-key"
-                        name="api_key"
-                        class="input-control input-mono"
-                        placeholder="Paste API key (e.g. AIza... from Google AI Studio)"
-                        autocomplete="off"
-                    >
-                    <p class="field-hint">Official endpoint URL is built-in (no URL needed for Google AI Studio keys). Leave URL below blank unless using a custom proxy.</p>
-                    <label for="api-base-url" class="field-label" style="margin-top: 8px;">API Link / Base URL (optional)</label>
-                    <input
-                        type="url"
-                        id="api-base-url"
-                        name="api_base_url"
-                        class="input-control input-mono"
-                        placeholder="Optional: leave blank unless using a custom proxy URL"
-                        autocomplete="off"
-                    >
+                    <div class="api-keys-grid">
+                        <div class="field">
+                            <label for="api-key" class="field-label">API Key 1 (Primary)</label>
+                            <input
+                                type="password"
+                                id="api-key"
+                                name="api_key"
+                                class="input-control input-mono"
+                                placeholder="Paste primary key (e.g. AIza...)"
+                                autocomplete="off"
+                            >
+                        </div>
+                        <div class="field">
+                            <label for="api-key-2" class="field-label">API Key 2 (Optional — Parallel Worker)</label>
+                            <input
+                                type="password"
+                                id="api-key-2"
+                                name="api_key_2"
+                                class="input-control input-mono"
+                                placeholder="Optional 2nd key to double speed"
+                                autocomplete="off"
+                            >
+                        </div>
+                    </div>
+                    <p class="field-hint" id="api-key-hint">Keys are remembered automatically in this browser (use Key Dashboard above for Gmail sync). Adding 2 keys from 2 accounts lets both workers run in parallel.</p>
+                    <details class="advanced-details" style="margin-top: 4px;">
+                        <summary class="advanced-summary">Optional: Custom API Link / Base URL</summary>
+                        <input
+                            type="url"
+                            id="api-base-url"
+                            name="api_base_url"
+                            class="input-control input-mono"
+                            style="margin-top: 6px;"
+                            placeholder="Optional: leave blank unless using a custom proxy URL"
+                            autocomplete="off"
+                        >
+                    </details>
                 </div>
 
                 <div class="lang-grid">

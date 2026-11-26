@@ -265,3 +265,52 @@ def test_web_pdf_page_range_and_gemini_404_fallback(web_client, tmp_path: Path, 
     assert done_job["progress"]["total_pages"] == 3
     assert done_job["progress"]["completed_pages"] == 3
     assert "huge_book_p2-4_translated.pdf" in done_job["files"]
+
+
+def test_web_dual_api_keys_and_dashboard_elements(web_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    html_resp = web_client.get("/")
+    assert html_resp.status_code == 200
+    html = html_resp.get_data(as_text=True)
+    assert html.lower().count("<form") == 1
+    assert 'id="api-key"' in html
+    assert 'id="api-key-2"' in html
+    assert 'id="account-dashboard"' in html
+    assert 'id="gmail-signin-btn"' in html
+    assert "http://" not in html and "https://" not in html
+
+    monkeypatch.setenv(
+        "FIREBASE_WEB_CONFIG",
+        json.dumps({"apiKey": "fb-k", "authDomain": "demo.firebaseapp.com", "projectId": "demo"}),
+    )
+    meta_resp = web_client.get("/api/meta")
+    assert meta_resp.status_code == 200
+    meta = meta_resp.get_json()
+    assert meta["firebase_config"]["projectId"] == "demo"
+
+    pdf_path = _make_text_pdf(tmp_path / "dual_keys.pdf", pages=6)
+    seen_keys: list[str] = []
+
+    def _fake_create_engine(name, **kwargs):
+        seen_keys.append(kwargs.get("api_key", ""))
+        return _DummyPdfTranslator()
+
+    monkeypatch.setattr("mathtranslate.engines.create_engine", _fake_create_engine)
+    monkeypatch.setattr("mathtranslate.translate.create_engine", _fake_create_engine)
+
+    with open(pdf_path, "rb") as fh:
+        resp = web_client.post(
+            "/api/translate/pdf",
+            data={
+                "file": (io.BytesIO(fh.read()), "dual_keys.pdf"),
+                "engine": "gemini",
+                "api_key": "key-alpha",
+                "api_key_2": "key-beta",
+                "l_from": "en",
+                "l_to": "vi",
+            },
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 202
+    done_job = _wait_for_job(web_client, resp.get_json()["job_id"])
+    assert done_job["status"] == "done"
+    assert set(seen_keys) == {"key-alpha", "key-beta"}

@@ -172,6 +172,7 @@ def _validate_translation_params() -> tuple[dict[str, Any] | None, tuple[Any, in
 
     compile_pdf = _parse_bool(_get_payload_field("compile_pdf", False), default=False)
     api_key = str(_get_payload_field("api_key", "") or "").strip() or None
+    api_key_2 = str(_get_payload_field("api_key_2", "") or "").strip() or None
     api_base_url = str(_get_payload_field("api_base_url", "") or "").strip() or None
     if api_base_url:
         if not (api_base_url.startswith("https://") or api_base_url.startswith("http://")):
@@ -185,6 +186,7 @@ def _validate_translation_params() -> tuple[dict[str, Any] | None, tuple[Any, in
         "l_to": l_to,
         "compile_pdf": compile_pdf,
         "api_key": api_key,
+        "api_key_2": api_key_2,
         "api_base_url": api_base_url,
     }, None
 
@@ -266,6 +268,7 @@ def _create_job(mode: str, params: dict[str, Any]) -> tuple[str, str, str]:
         "_output_filename": None,
         "_pdf_translator": None,
         "_api_key": params.get("api_key"),
+        "_api_key_2": params.get("api_key_2"),
         "_api_base_url": params.get("api_base_url"),
     }
     with JOBS_LOCK:
@@ -610,6 +613,15 @@ def index():
 
 @app.route("/api/meta", methods=["GET"])
 def api_meta():
+    firebase_config = None
+    raw_fb = os.environ.get("FIREBASE_WEB_CONFIG", "").strip()
+    if raw_fb:
+        try:
+            parsed_fb = json.loads(raw_fb)
+            if isinstance(parsed_fb, dict) and parsed_fb.get("apiKey") and parsed_fb.get("projectId"):
+                firebase_config = parsed_fb
+        except Exception:
+            firebase_config = None
     return jsonify(
         {
             "engines": list(AVAILABLE_ENGINES),
@@ -620,6 +632,7 @@ def api_meta():
                 "l_to": DEFAULT_L_TO,
                 "compile_pdf": False,
             },
+            "firebase_config": firebase_config,
             "version": __version__,
         }
     )
@@ -1012,20 +1025,49 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
         l_to = job["l_to"]
         existing_runner = job.get("_pdf_translator")
         api_key = job.get("_api_key")
+        api_key_2 = job.get("_api_key_2")
         api_base_url = job.get("_api_base_url")
 
     _update_job(job_id, status="running", error=None)
     output_path = os.path.join(output_dir, output_filename)
-    engine_kwargs: dict[str, Any] = {}
-    if api_key:
-        engine_kwargs["api_key"] = api_key
-    if api_base_url:
-        engine_kwargs["base_url"] = api_base_url
-    custom_factory = (
-        (lambda: TextTranslator(engine, l_to, l_from, **engine_kwargs))
-        if engine_kwargs
-        else None
-    )
+    api_keys: list[str] = []
+    for k in (api_key, api_key_2):
+        if k and k not in api_keys:
+            api_keys.append(k)
+
+    key_lock = threading.Lock()
+    key_counter = [0]
+
+    def _build_custom_translator():
+        base_kwargs: dict[str, Any] = {}
+        if api_base_url:
+            base_kwargs["base_url"] = api_base_url
+        if len(api_keys) <= 1:
+            if api_keys:
+                base_kwargs["api_key"] = api_keys[0]
+            return TextTranslator(engine, l_to, l_from, **base_kwargs)
+
+        pool = [TextTranslator(engine, l_to, l_from, api_key=k, **base_kwargs) for k in api_keys]
+
+        class _RotatingTranslator:
+            def __init__(self) -> None:
+                self.engine = engine
+                self.language_to = l_to
+                self.language_from = l_from
+                self.translator = pool[0].translator
+
+            def translate(self, text: str) -> str:
+                with key_lock:
+                    idx = key_counter[0] % len(pool)
+                    key_counter[0] += 1
+                try:
+                    return pool[idx].translate(text)
+                except Exception:
+                    return pool[(idx + 1) % len(pool)].translate(text)
+
+        return _RotatingTranslator()
+
+    custom_factory = _build_custom_translator if (api_keys or api_base_url) else None
 
     def _on_progress(cp: Any) -> None:
         progress, overflow_pages, scan_pages = _checkpoint_to_progress(cp)

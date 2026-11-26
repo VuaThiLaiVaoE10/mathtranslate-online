@@ -40,7 +40,22 @@
     const engineSelect = document.getElementById("engine");
     const apiKeyField = document.getElementById("api-key-field");
     const apiKeyInput = document.getElementById("api-key");
+    const apiKey2Input = document.getElementById("api-key-2");
     const apiBaseUrlInput = document.getElementById("api-base-url");
+    const openDashboardBtn = document.getElementById("open-dashboard-btn");
+    const closeDashboardBtn = document.getElementById("close-dashboard-btn");
+    const accountDashboard = document.getElementById("account-dashboard");
+    const vaultSummary = document.getElementById("vault-summary");
+    const vaultSaveBtn = document.getElementById("vault-save-btn");
+    const vaultClearBtn = document.getElementById("vault-clear-btn");
+    const gmailSyncStatus = document.getElementById("gmail-sync-status");
+    const gmailUserLabel = document.getElementById("gmail-user-label");
+    const gmailSigninBtn = document.getElementById("gmail-signin-btn");
+    const gmailSyncBtn = document.getElementById("gmail-sync-btn");
+    const gmailSignoutBtn = document.getElementById("gmail-signout-btn");
+    const firebaseConfigInput = document.getElementById("firebase-config-input");
+    const saveFbConfigBtn = document.getElementById("save-fb-config-btn");
+    const clearFbConfigBtn = document.getElementById("clear-fb-config-btn");
     const lFromSelect = document.getElementById("l-from");
     const lToSelect = document.getElementById("l-to");
     const swapLangBtn = document.getElementById("swap-lang-btn");
@@ -573,6 +588,9 @@
                     });
                 });
             }
+            if (meta.firebase_config && !localStorage.getItem("mt_firebase_config_v1")) {
+                serverFirebaseConfig = meta.firebase_config;
+            }
         } catch (_) {
             // Server-rendered options already exist as fallback.
         }
@@ -587,8 +605,14 @@
         if (apiKeyInput && apiKeyInput.value.trim()) {
             formData.append("api_key", apiKeyInput.value.trim());
         }
+        if (apiKey2Input && apiKey2Input.value.trim()) {
+            formData.append("api_key_2", apiKey2Input.value.trim());
+        }
         if (apiBaseUrlInput && apiBaseUrlInput.value.trim()) {
             formData.append("api_base_url", apiBaseUrlInput.value.trim());
+        }
+        if (["gemini", "openai", "deepl"].includes(engineSelect.value)) {
+            saveCurrentEngineKeysToVault();
         }
         formData.append("l_from", lFromSelect.value);
         formData.append("l_to", lToSelect.value);
@@ -791,19 +815,307 @@
     if (pdfInput && pdfFilename) {
         setupDropzone("pdf", pdfInput, pdfFilename, ".pdf", "or drop a PDF here");
     }
+    const VAULT_KEY = "mt_key_vault_v1";
+    const FB_CFG_KEY = "mt_firebase_config_v1";
+    let serverFirebaseConfig = null;
+    let fbRuntime = null; // { auth, db, user, fbMod, authMod, fsMod }
+
+    function readVault() {
+        try {
+            const raw = localStorage.getItem(VAULT_KEY);
+            return raw ? JSON.parse(raw) : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    function writeVault(vault) {
+        try {
+            localStorage.setItem(VAULT_KEY, JSON.stringify(vault));
+        } catch (_) {
+            // Ignore storage quota errors in restricted/incognito sessions.
+        }
+        refreshVaultSummary();
+    }
+
+    function refreshVaultSummary() {
+        if (!vaultSummary || !engineSelect) {
+            return;
+        }
+        const vault = readVault();
+        const savedEngines = Object.keys(vault).filter(
+            (eng) => vault[eng] && (vault[eng].key1 || vault[eng].key2 || vault[eng].baseUrl)
+        );
+        if (savedEngines.length === 0) {
+            vaultSummary.textContent = "No API keys stored yet in this browser.";
+        } else {
+            const parts = savedEngines.map((eng) => {
+                const entry = vault[eng] || {};
+                const cnt = (entry.key1 ? 1 : 0) + (entry.key2 ? 1 : 0);
+                return `${eng}: ${cnt} key(s)`;
+            });
+            vaultSummary.textContent = `Stored locally: ${parts.join(" | ")}`;
+        }
+    }
+
+    function loadKeysForCurrentEngine() {
+        if (!engineSelect) {
+            return;
+        }
+        const vault = readVault();
+        const entry = vault[engineSelect.value] || {};
+        if (apiKeyInput) {
+            apiKeyInput.value = entry.key1 || "";
+        }
+        if (apiKey2Input) {
+            apiKey2Input.value = entry.key2 || "";
+        }
+        if (apiBaseUrlInput) {
+            apiBaseUrlInput.value = entry.baseUrl || "";
+        }
+        refreshVaultSummary();
+    }
+
+    function saveCurrentEngineKeysToVault() {
+        if (!engineSelect) {
+            return;
+        }
+        const eng = engineSelect.value;
+        const vault = readVault();
+        vault[eng] = {
+            key1: apiKeyInput ? apiKeyInput.value.trim() : "",
+            key2: apiKey2Input ? apiKey2Input.value.trim() : "",
+            baseUrl: apiBaseUrlInput ? apiBaseUrlInput.value.trim() : "",
+        };
+        writeVault(vault);
+        syncVaultToFirestore(vault).catch(() => {});
+    }
+
+    function getActiveFirebaseConfig() {
+        try {
+            const raw = localStorage.getItem(FB_CFG_KEY);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (parsed && parsed.apiKey && parsed.projectId) {
+                    return parsed;
+                }
+            }
+        } catch (_) {}
+        return serverFirebaseConfig;
+    }
+
+    async function ensureFirebaseInitialized() {
+        const cfg = getActiveFirebaseConfig();
+        if (!cfg) {
+            return null;
+        }
+        if (fbRuntime) {
+            return fbRuntime;
+        }
+        const fbBase = "https://www.gstatic.com/firebasejs/11.4.0";
+        const [appMod, authMod, fsMod] = await Promise.all([
+            import(`${fbBase}/firebase-app.js`),
+            import(`${fbBase}/firebase-auth.js`),
+            import(`${fbBase}/firebase-firestore.js`),
+        ]);
+        const fbApp = appMod.getApps().length ? appMod.getApps()[0] : appMod.initializeApp(cfg);
+        const auth = authMod.getAuth(fbApp);
+        const db = fsMod.getFirestore(fbApp);
+        fbRuntime = { auth, db, user: auth.currentUser || null, appMod, authMod, fsMod };
+
+        authMod.onAuthStateChanged(auth, async (user) => {
+            fbRuntime.user = user;
+            updateGmailUi();
+            if (user) {
+                await pullVaultFromFirestore();
+            }
+        });
+        return fbRuntime;
+    }
+
+    function updateGmailUi() {
+        const cfg = getActiveFirebaseConfig();
+        const user = fbRuntime && fbRuntime.user;
+        if (!gmailUserLabel || !gmailSigninBtn || !gmailSyncBtn || !gmailSignoutBtn) {
+            return;
+        }
+        if (user) {
+            gmailUserLabel.textContent = `Signed in as ${user.email || user.displayName || user.uid}`;
+            gmailSigninBtn.hidden = true;
+            gmailSyncBtn.hidden = false;
+            gmailSignoutBtn.hidden = false;
+            if (openDashboardBtn) {
+                openDashboardBtn.textContent = `Gmail: ${user.email || "Connected"}`;
+            }
+            if (gmailSyncStatus) {
+                gmailSyncStatus.textContent = "Gmail cloud sync active: your 2 API keys follow your Google account across devices.";
+            }
+        } else {
+            gmailUserLabel.textContent = cfg
+                ? "Ready for Google Sign-In. Click below to link your Gmail."
+                : "Gmail sync not configured yet (using Browser Vault). Paste Firebase Config below to enable cross-device Gmail login.";
+            gmailSigninBtn.hidden = false;
+            gmailSyncBtn.hidden = true;
+            gmailSignoutBtn.hidden = true;
+            if (openDashboardBtn) {
+                openDashboardBtn.textContent = "Key Dashboard / Gmail";
+            }
+        }
+    }
+
+    async function pullVaultFromFirestore() {
+        if (!fbRuntime || !fbRuntime.user) {
+            return;
+        }
+        const { db, user, fsMod } = fbRuntime;
+        const ref = fsMod.doc(db, "users", user.uid);
+        const snap = await fsMod.getDoc(ref);
+        if (snap.exists()) {
+            const data = snap.data() || {};
+            if (data.keysByEngine && typeof data.keysByEngine === "object") {
+                const merged = Object.assign({}, readVault(), data.keysByEngine);
+                writeVault(merged);
+                loadKeysForCurrentEngine();
+            }
+        }
+    }
+
+    async function syncVaultToFirestore(vaultObj) {
+        if (!fbRuntime || !fbRuntime.user) {
+            return;
+        }
+        const { db, user, fsMod } = fbRuntime;
+        const ref = fsMod.doc(db, "users", user.uid);
+        await fsMod.setDoc(
+            ref,
+            {
+                email: user.email || "",
+                keysByEngine: vaultObj || readVault(),
+                updatedAt: Date.now(),
+            },
+            { merge: true }
+        );
+    }
+
     function syncApiKeyVisibility() {
         if (!apiKeyField || !engineSelect) {
             return;
         }
         const needsKey = ["gemini", "openai", "deepl"].includes(engineSelect.value);
         apiKeyField.hidden = !needsKey;
+        loadKeysForCurrentEngine();
     }
 
     if (engineSelect) {
         engineSelect.addEventListener("change", syncApiKeyVisibility);
     }
+    [apiKeyInput, apiKey2Input, apiBaseUrlInput].forEach((el) => {
+        if (el) {
+            el.addEventListener("change", saveCurrentEngineKeysToVault);
+        }
+    });
+
+    if (openDashboardBtn && accountDashboard) {
+        openDashboardBtn.addEventListener("click", () => {
+            accountDashboard.hidden = !accountDashboard.hidden;
+            refreshVaultSummary();
+            updateGmailUi();
+        });
+    }
+    if (closeDashboardBtn && accountDashboard) {
+        closeDashboardBtn.addEventListener("click", () => {
+            accountDashboard.hidden = true;
+        });
+    }
+    if (vaultSaveBtn) {
+        vaultSaveBtn.addEventListener("click", () => {
+            saveCurrentEngineKeysToVault();
+        });
+    }
+    if (vaultClearBtn) {
+        vaultClearBtn.addEventListener("click", () => {
+            try {
+                localStorage.removeItem(VAULT_KEY);
+            } catch (_) {}
+            if (apiKeyInput) apiKeyInput.value = "";
+            if (apiKey2Input) apiKey2Input.value = "";
+            if (apiBaseUrlInput) apiBaseUrlInput.value = "";
+            refreshVaultSummary();
+        });
+    }
+    if (saveFbConfigBtn && firebaseConfigInput) {
+        saveFbConfigBtn.addEventListener("click", async () => {
+            try {
+                const parsed = JSON.parse(firebaseConfigInput.value.trim());
+                localStorage.setItem(FB_CFG_KEY, JSON.stringify(parsed));
+                fbRuntime = null;
+                await ensureFirebaseInitialized();
+                updateGmailUi();
+            } catch (err) {
+                if (gmailUserLabel) {
+                    gmailUserLabel.textContent = `Invalid Firebase JSON: ${err.message}`;
+                }
+            }
+        });
+    }
+    if (clearFbConfigBtn) {
+        clearFbConfigBtn.addEventListener("click", () => {
+            try {
+                localStorage.removeItem(FB_CFG_KEY);
+            } catch (_) {}
+            if (firebaseConfigInput) firebaseConfigInput.value = "";
+            fbRuntime = null;
+            updateGmailUi();
+        });
+    }
+    if (gmailSigninBtn) {
+        gmailSigninBtn.addEventListener("click", async () => {
+            try {
+                const rt = await ensureFirebaseInitialized();
+                if (!rt) {
+                    if (gmailUserLabel) {
+                        gmailUserLabel.textContent = "Please paste your Firebase Web Config JSON below first (1-time setup).";
+                    }
+                    return;
+                }
+                const provider = new rt.authMod.GoogleAuthProvider();
+                await rt.authMod.signInWithPopup(rt.auth, provider);
+                await syncVaultToFirestore(readVault());
+                updateGmailUi();
+            } catch (err) {
+                if (gmailUserLabel) {
+                    gmailUserLabel.textContent = `Sign-in error: ${err.message}`;
+                }
+            }
+        });
+    }
+    if (gmailSyncBtn) {
+        gmailSyncBtn.addEventListener("click", async () => {
+            try {
+                await syncVaultToFirestore(readVault());
+                await pullVaultFromFirestore();
+                if (gmailUserLabel && fbRuntime && fbRuntime.user) {
+                    gmailUserLabel.textContent = `Synced with ${fbRuntime.user.email}`;
+                }
+            } catch (err) {
+                if (gmailUserLabel) gmailUserLabel.textContent = `Sync error: ${err.message}`;
+            }
+        });
+    }
+    if (gmailSignoutBtn) {
+        gmailSignoutBtn.addEventListener("click", async () => {
+            if (fbRuntime && fbRuntime.auth) {
+                await fbRuntime.authMod.signOut(fbRuntime.auth);
+                updateGmailUi();
+            }
+        });
+    }
 
     form.addEventListener("submit", handleSubmit);
-    hydrateMeta().then(syncApiKeyVisibility);
+    hydrateMeta().then(async () => {
+        syncApiKeyVisibility();
+        await ensureFirebaseInitialized().catch(() => {});
+        updateGmailUi();
+    });
     syncApiKeyVisibility();
 })();
