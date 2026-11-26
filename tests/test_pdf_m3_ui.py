@@ -221,3 +221,47 @@ def test_gui_pdf_controller_scan_abort_and_complete(tmp_path: Path):
     ok2, _ = ctrl.status_queue.get_nowait()
     assert ok2 is True
     assert out_text.is_file()
+
+
+def test_web_pdf_page_range_and_gemini_404_fallback(web_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from unittest import mock
+    from mathtranslate.engines.gemini_engine import GeminiTranslator
+
+    # 1. Verify Gemini 404 auto-fallback from retired gemini-2.0-flash -> gemini-2.5-flash
+    tr = GeminiTranslator(api_key="AIza-test", model="gemini-2.0-flash", min_interval=0.0)
+    resp_404 = mock.MagicMock()
+    resp_404.status_code = 404
+    resp_200 = mock.MagicMock()
+    resp_200.status_code = 200
+    resp_200.json.return_value = {"candidates": [{"content": {"parts": [{"text": "Bản dịch XMATHX_0"}]}}]}
+    with mock.patch("mathtranslate.engines.gemini_engine.requests.post", side_effect=[resp_404, resp_200]) as m_post:
+        out = tr.translate("Source XMATHX_0", language_to="vi", language_from="en")
+        assert out == "Bản dịch XMATHX_0"
+        assert tr.model == "gemini-2.5-flash"
+        assert m_post.call_count == 2
+
+    # 2. Verify page_range slicing for large textbooks
+    pdf_path = _make_text_pdf(tmp_path / "huge_book.pdf", pages=6)
+    dummy = _DummyPdfTranslator()
+    monkeypatch.setattr("mathtranslate.engines.create_engine", lambda *a, **kw: dummy)
+    monkeypatch.setattr("mathtranslate.translate.create_engine", lambda *a, **kw: dummy)
+
+    with open(pdf_path, "rb") as fh:
+        resp = web_client.post(
+            "/api/translate/pdf",
+            data={
+                "file": (io.BytesIO(fh.read()), "huge_book.pdf"),
+                "engine": "google",
+                "l_from": "en",
+                "l_to": "vi",
+                "page_range": "2-4",
+            },
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 202
+    job_id = resp.get_json()["job_id"]
+    done_job = _wait_for_job(web_client, job_id)
+    assert done_job["status"] == "done"
+    assert done_job["progress"]["total_pages"] == 3
+    assert done_job["progress"]["completed_pages"] == 3
+    assert "huge_book_p2-4_translated.pdf" in done_job["files"]

@@ -35,6 +35,7 @@
     const pdfFilename = document.getElementById("pdf-filename");
     const pdfInspectBox = document.getElementById("pdf-inspect-box");
     const pdfInspectSummary = document.getElementById("pdf-inspect-summary");
+    const pdfPageRangeInput = document.getElementById("pdf-page-range");
     const pdfGlossaryInput = document.getElementById("pdf-glossary");
     const engineSelect = document.getElementById("engine");
     const apiKeyField = document.getElementById("api-key-field");
@@ -550,6 +551,9 @@
                 formData.append("file", file);
             }
             formData.append("scan_policy", "abort");
+            if (pdfPageRangeInput && pdfPageRangeInput.value.trim()) {
+                formData.append("page_range", pdfPageRangeInput.value.trim());
+            }
             try {
                 const parsedGlossary = parseGlossaryText(pdfGlossaryInput ? pdfGlossaryInput.value : "");
                 if (parsedGlossary) {

@@ -42,7 +42,7 @@ app.secret_key = os.environ.get("MATHTRANSLATE_SECRET_KEY") or secrets.token_hex
 app.config["JOBS_ROOT"] = os.environ.get("MATHTRANSLATE_WEB_JOBS_DIR") or os.path.join(
     tempfile.gettempdir(), "mathtranslate_web_jobs"
 )
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB for 1000+ page textbooks
 app.config["JOB_TTL_SECONDS"] = 3600
 
 DEFAULT_ENGINE = "google"
@@ -782,6 +782,36 @@ def api_translate_pdf():
         return jsonify({"error": "Please select a .pdf file to upload."}), 400
 
     stem = os.path.splitext(safe_name)[0]
+    raw_page_range = str(request.form.get("page_range") or data.get("page_range") or "").strip()
+    if raw_page_range:
+        m_range = re.match(r"^\s*(\d+)\s*(?:[-–:]\s*(\d+))?\s*$", raw_page_range)
+        if not m_range:
+            return jsonify({"error": "Invalid page_range. Use format like '1-50' or '12'."}), 400
+        p_start = int(m_range.group(1))
+        p_end = int(m_range.group(2) or p_start)
+        if p_start < 1 or p_end < p_start:
+            return jsonify({"error": "Invalid page_range: start page must be >= 1 and <= end page."}), 400
+        try:
+            import pymupdf
+
+            with pymupdf.open(input_path) as full_doc:
+                doc_len = len(full_doc)
+                if p_start > doc_len:
+                    return jsonify({"error": f"Start page {p_start} exceeds PDF length ({doc_len} pages)."}), 400
+                p_end = min(p_end, doc_len)
+                sliced_path = os.path.join(input_dir, f"{stem}_p{p_start}-{p_end}.pdf")
+                sliced_doc = pymupdf.open()
+                try:
+                    sliced_doc.insert_pdf(full_doc, from_page=p_start - 1, to_page=p_end - 1)
+                    sliced_doc.ez_save(sliced_path)
+                finally:
+                    sliced_doc.close()
+            input_path = sliced_path
+            stem = f"{stem}_p{p_start}-{p_end}"
+            _append_log(job_id, f"[pdf] Extracted page range {p_start}-{p_end} ({p_end - p_start + 1} pages).\n")
+        except Exception as exc:
+            return jsonify({"error": f"Failed to slice page range: {exc}"}), 400
+
     output_filename = f"{stem}_translated.pdf"
     _update_job(job_id, _input_path=input_path, _output_filename=output_filename)
 
@@ -991,7 +1021,9 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     l_to=l_to,
                     scan_policy=scan_policy,
                     glossary=glossary,
-                    max_workers=1 if (engine == "google" or low_mem) else 2,
+                    max_workers=1 if (engine in {"google", "gemini"} or low_mem) else 2,
+                    max_retries=6 if engine == "gemini" else 4,
+                    base_backoff=2.0 if engine == "gemini" else 0.5,
                     translator_factory=custom_factory,
                     on_progress=_on_progress,
                     job_id=job_id,

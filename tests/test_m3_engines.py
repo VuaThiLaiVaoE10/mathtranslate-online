@@ -248,10 +248,10 @@ def test_ollama_engine_works_without_api_key_and_preserves_xmathx(monkeypatch):
 def test_gemini_engine_sends_and_preserves_xmathx(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-gemini-key")
     engine = create_engine("gemini")
-    assert engine.model == "gemini-2.0-flash"
+    assert engine.model == "gemini-2.5-flash"
     assert (
         engine.endpoint
-        == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     )
 
     sample_input = "Integrating XMATHX_0 over the domain yields zero."
@@ -278,7 +278,7 @@ def test_gemini_engine_sends_and_preserves_xmathx(monkeypatch):
         url, kwargs = mock_post.call_args[0][0], mock_post.call_args[1]
         assert (
             url
-            == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+            == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         )
         assert kwargs["headers"]["x-goog-api-key"] == "AIza-test-gemini-key"
         assert "params" not in kwargs

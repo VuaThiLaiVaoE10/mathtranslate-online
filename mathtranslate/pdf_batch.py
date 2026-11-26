@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import copy
 from dataclasses import dataclass, field
+import gc
 import hashlib
 import json
 import os
@@ -612,6 +613,8 @@ class PdfBatchTranslator:
         cls_map: dict[int, PageClassification],
         toc: list[Any],
         metadata: dict[str, Any],
+        *,
+        fast: bool = False,
     ) -> list[int]:
         """Assemble `dest_path` atomically from completed `batch_XXXX.pdf` slices.
 
@@ -666,7 +669,7 @@ class PdfBatchTranslator:
                 except Exception:
                     pass
 
-            merged.save(tmp_path, garbage=3, deflate=True)
+            merged.save(tmp_path, garbage=1 if fast else 3, deflate=True)
             merged.close()
             os.replace(tmp_path, str(dest_path))
         finally:
@@ -940,6 +943,11 @@ class PdfBatchTranslator:
                             except OSError:
                                 pass
 
+            try:
+                pymupdf.TOOLS.store_shrink(100)
+            except Exception:
+                pass
+            gc.collect()
             return b_idx, batch_pages, keep_pages, flagged
 
         failed_exc: BaseException | None = None
@@ -1009,14 +1017,22 @@ class PdfBatchTranslator:
                             else:
                                 ckpt.eta_seconds = None
 
-                            self._assemble_pdf_from_batches(
-                                self.partial_path,
-                                ckpt.completed_batches,
-                                batches,
-                                cls_map,
-                                toc,
-                                metadata,
-                            )
+                            partial_stride = 1 if len(batches) <= 20 else max(2, len(batches) // 10)
+                            done_count = len(ckpt.completed_batches)
+                            if (
+                                done_count == 1
+                                or done_count % partial_stride == 0
+                                or self._cancel_event.is_set()
+                            ):
+                                self._assemble_pdf_from_batches(
+                                    self.partial_path,
+                                    ckpt.completed_batches,
+                                    batches,
+                                    cls_map,
+                                    toc,
+                                    metadata,
+                                    fast=len(batches) > 20,
+                                )
                             self._write_checkpoint_locked()
                             if self.on_progress is not None:
                                 ckpt_snapshot = copy.deepcopy(ckpt)
@@ -1031,6 +1047,16 @@ class PdfBatchTranslator:
 
             if self._cancel_event.is_set() and len(ckpt.completed_batches) < len(batches):
                 with self._assembly_lock:
+                    if ckpt.completed_batches:
+                        self._assemble_pdf_from_batches(
+                            self.partial_path,
+                            ckpt.completed_batches,
+                            batches,
+                            cls_map,
+                            toc,
+                            metadata,
+                            fast=len(batches) > 20,
+                        )
                     ckpt.status = "cancelled"
                     ckpt.elapsed_seconds = round(
                         prior_elapsed + (time.monotonic() - session_start), 3
