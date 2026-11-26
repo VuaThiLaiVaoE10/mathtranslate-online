@@ -669,7 +669,7 @@ class PdfBatchTranslator:
                 except Exception:
                     pass
 
-            merged.save(tmp_path, garbage=1 if fast else 3, deflate=True)
+            merged.save(tmp_path, garbage=2 if fast else 3, deflate=True)
             merged.close()
             os.replace(tmp_path, str(dest_path))
         finally:
@@ -683,6 +683,11 @@ class PdfBatchTranslator:
                     os.remove(tmp_path)
                 except OSError:
                     pass
+            try:
+                pymupdf.TOOLS.store_shrink(100)
+            except Exception:
+                pass
+            gc.collect()
 
         return included_orig_pages
 

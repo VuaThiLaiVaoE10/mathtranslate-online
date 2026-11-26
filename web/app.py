@@ -811,6 +811,10 @@ def api_translate_pdf():
                     sliced_doc.ez_save(sliced_path)
                 finally:
                     sliced_doc.close()
+            try:
+                os.remove(input_path)
+            except OSError:
+                pass
             input_path = sliced_path
             stem = f"{stem}_p{p_start}-{p_end}"
             _append_log(job_id, f"[pdf] Extracted page range {p_start}-{p_end} ({p_end - p_start + 1} pages).\n")
@@ -1029,7 +1033,7 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                 low_mem = os.environ.get("MATHTRANSLATE_LOW_MEM", "").strip() in {"1", "true", "yes"}
                 expected_pages = int((job.get("progress") or {}).get("total_pages") or 0)
                 if low_mem:
-                    opt_workers = 1 if (engine == "google" or expected_pages > 150) else 2
+                    opt_workers = 1 if (engine == "google" or expected_pages > 80) else 2
                 else:
                     cpu_workers = min(4, max(2, os.cpu_count() or 2))
                     opt_workers = 2 if engine == "google" else cpu_workers

@@ -90,6 +90,7 @@
     let pollTimer = null;
     let activeJobId = null;
     let inspectedUploadId = null;
+    let pollFailures = 0;
 
     function formatBytes(bytes) {
         if (!Number.isFinite(bytes) || bytes < 1024) {
@@ -439,15 +440,38 @@
             const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
                 headers: { Accept: "application/json" },
             });
-            const data = await response.json();
+            const rawText = await response.text();
+            let data = null;
+            try {
+                data = rawText ? JSON.parse(rawText) : null;
+            } catch (_) {
+                data = null;
+            }
+            if (!data) {
+                if (response.status >= 500 || !response.ok) {
+                    throw new Error(`Server busy (HTTP ${response.status})`);
+                }
+                throw new Error("Empty response from server");
+            }
             if (!response.ok) {
+                pollFailures = 0;
                 throw new Error(data.error || `Status request failed (${response.status})`);
             }
+            pollFailures = 0;
             renderJob(data);
             if (data.status === "queued" || data.status === "running") {
-                pollTimer = window.setTimeout(() => pollJob(jobId), 800);
+                pollTimer = window.setTimeout(() => pollJob(jobId), 1200);
             }
         } catch (err) {
+            const isTransient = /Server busy|Empty response|Failed to fetch|NetworkError|Load failed/i.test(
+                err && err.message ? err.message : ""
+            );
+            if (isTransient && pollFailures < 6) {
+                pollFailures += 1;
+                runningSummary.textContent = `Reconnecting to server (${pollFailures}/6)...`;
+                pollTimer = window.setTimeout(() => pollJob(jobId), 2000);
+                return;
+            }
             stopPolling();
             setBusy(false);
             setPanelState("error", "Failed");
