@@ -1102,11 +1102,26 @@ def download_artifact(job_id: str, filename: str):
     return send_from_directory(real_output_dir, safe_name, as_attachment=True)
 
 
-def run_server(host: str = "127.0.0.1", port: int = 5000) -> None:
+def run_server(host: str | None = None, port: int | None = None) -> None:
     """Start the cleanup daemon thread and launch the local Flask web server."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MathTranslate v2 Local Web UI")
+    parser.add_argument(
+        "--host",
+        default=host or os.environ.get("MATHTRANSLATE_HOST", "127.0.0.1"),
+        help="Host interface to bind (use 0.0.0.0 for LAN access).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=port or int(os.environ.get("MATHTRANSLATE_PORT", "5000")),
+        help="TCP port to listen on (default: 5000).",
+    )
+    args, _ = parser.parse_known_args()
     _ensure_jobs_root()
     start_cleanup_thread()
-    app.run(host=host, port=port, debug=False)
+    app.run(host=args.host, port=args.port, debug=False)
 
 
 # Ensure cleanup thread is active even when run via WSGI or imported directly
