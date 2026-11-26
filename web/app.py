@@ -990,6 +990,7 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     l_to=l_to,
                     scan_policy=scan_policy,
                     glossary=glossary,
+                    max_workers=1 if engine == "google" else 2,
                     translator_factory=custom_factory,
                     on_progress=_on_progress,
                     job_id=job_id,

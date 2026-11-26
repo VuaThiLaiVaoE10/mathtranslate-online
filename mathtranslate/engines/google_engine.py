@@ -13,6 +13,7 @@ class GoogleTranslator(BaseTranslator):
     name = "google"
     supports_multithread = True
     ENDPOINT = "https://translate.googleapis.com/translate_a/single"
+    CLIENTS5_ENDPOINT = "https://clients5.google.com/translate_a/t"
     DEFAULT_USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -82,6 +83,32 @@ class GoogleTranslator(BaseTranslator):
     def _translate_via_mtranslate(self, text: str, language_to: str, language_from: str) -> str:
         return mtranslate.translate(text, language_to, language_from or "auto")
 
+    def _translate_via_clients5(self, text: str, language_to: str, language_from: str) -> str:
+        self._pace_request()
+        resp = requests.post(
+            self.CLIENTS5_ENDPOINT,
+            params={
+                "client": "dict-chrome-ex",
+                "sl": language_from or "auto",
+                "tl": language_to,
+            },
+            data={"q": text},
+            headers={"User-Agent": self.user_agent},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, list):
+            chunks: list[str] = []
+            for item in payload:
+                if isinstance(item, str):
+                    chunks.append(item)
+                elif isinstance(item, list) and item and item[0] is not None:
+                    chunks.append(str(item[0]))
+            if chunks:
+                return "".join(chunks)
+        raise ValueError("Unexpected response structure from clients5.google.com")
+
     def translate(self, text: str, language_to: str, language_from: str = "auto") -> str:
         if not text:
             return text
@@ -90,5 +117,8 @@ class GoogleTranslator(BaseTranslator):
         except Exception as primary_exc:
             try:
                 return self._translate_via_mtranslate(text, language_to, language_from)
-            except Exception as fallback_exc:
-                raise fallback_exc from primary_exc
+            except Exception as mtranslate_exc:
+                try:
+                    return self._translate_via_clients5(text, language_to, language_from)
+                except Exception:
+                    raise mtranslate_exc from primary_exc
