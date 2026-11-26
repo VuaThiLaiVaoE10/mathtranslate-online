@@ -55,6 +55,15 @@
                     aria-selected="false"
                     aria-controls="panel-mode-zip"
                 >Project .zip</button>
+                <button
+                    type="button"
+                    class="mode-tab"
+                    role="tab"
+                    id="tab-pdf"
+                    data-mode="pdf"
+                    aria-selected="false"
+                    aria-controls="panel-mode-pdf"
+                >PDF (EN &rarr; VI)</button>
             </div>
 
             <form id="translate-form" class="translate-form" novalidate>
@@ -95,6 +104,35 @@
                             <span class="dropzone-name" id="zip-filename">or drop an archive here</span>
                         </div>
                         <p class="field-hint">Safely extracts the project, merges linked \input files, translates main documents, and repacks a .zip.</p>
+                    </div>
+                </div>
+
+                <div id="panel-mode-pdf" class="mode-panel" role="tabpanel" aria-labelledby="tab-pdf" hidden>
+                    <div class="field">
+                        <label for="pdf-file" class="field-label">PDF Document (.pdf)</label>
+                        <div class="dropzone" data-dropzone="pdf" tabindex="0" role="button" aria-label="Select or drop a .pdf file">
+                            <input type="file" id="pdf-file" name="pdf_file" accept=".pdf" class="sr-only">
+                            <span class="dropzone-action">Choose .pdf file</span>
+                            <span class="dropzone-name" id="pdf-filename">or drop a PDF here</span>
+                        </div>
+                        <p class="field-hint">Preserves layout, figures, and MathType/vector equations while translating prose in resilient page batches.</p>
+                    </div>
+
+                    <div id="pdf-inspect-box" class="inspect-card" hidden>
+                        <div class="inspect-title">Pre-flight Inspection</div>
+                        <div id="pdf-inspect-summary" class="inspect-summary"></div>
+                    </div>
+
+                    <div class="field">
+                        <label for="pdf-glossary" class="field-label">Terminology Glossary (JSON or term = translation)</label>
+                        <textarea
+                            id="pdf-glossary"
+                            name="glossary"
+                            class="input-control input-mono"
+                            rows="4"
+                            placeholder='{"eigenvalue": "tri rieng", "manifold": "da tap"}'
+                        ></textarea>
+                        <p class="field-hint">Consistent terminology applied across all batches. Auto-populated with detected terms after PDF inspection.</p>
                     </div>
                 </div>
 
@@ -196,6 +234,44 @@
                     <div class="banner-title">Translation in progress</div>
                     <div class="banner-body" id="running-summary">Queued for worker execution.</div>
                 </div>
+                <div id="pdf-progress-box" class="pdf-progress-box" hidden>
+                    <div class="progress-meta">
+                        <span id="pdf-progress-pages">0 / 0 pages</span>
+                        <span id="pdf-progress-eta">ETA: --</span>
+                    </div>
+                    <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                        <div id="pdf-progress-bar" class="progress-fill" style="width: 0%;"></div>
+                    </div>
+                    <div id="pdf-overflow-live" class="notice-box" hidden></div>
+                    <div class="pdf-controls-row">
+                        <button type="button" id="cancel-job-btn" class="btn-subtle btn-danger">Cancel Job</button>
+                        <a id="pdf-partial-link" class="btn-subtle" href="#" hidden>Download partial.pdf</a>
+                    </div>
+                </div>
+            </div>
+
+            <div id="state-awaiting-scan" class="state-block" hidden>
+                <div class="banner banner-warn" role="alert">
+                    <div class="banner-title">Scanned pages detected (No automatic OCR)</div>
+                    <div class="banner-body" id="scan-warning-summary">Some pages contain scanned images without a text layer. Choose how to proceed:</div>
+                </div>
+                <div id="scan-pages-list" class="notice-box"></div>
+                <div class="pdf-controls-row">
+                    <button type="button" id="scan-keep-btn" class="btn-subtle">Keep Original Pages</button>
+                    <button type="button" id="scan-skip-btn" class="btn-subtle">Skip Scan Pages</button>
+                    <button type="button" id="scan-cancel-btn" class="btn-subtle btn-danger">Cancel</button>
+                </div>
+            </div>
+
+            <div id="state-cancelled" class="state-block" hidden>
+                <div class="banner banner-warn">
+                    <div class="banner-title">Translation paused / cancelled</div>
+                    <div class="banner-body" id="cancelled-summary">Checkpoint saved on disk. You can resume from the last completed batch.</div>
+                </div>
+                <div class="pdf-controls-row">
+                    <button type="button" id="resume-job-btn" class="btn-primary">Resume Translation</button>
+                    <a id="pdf-cancelled-partial-link" class="btn-subtle" href="#" hidden>Download partial.pdf</a>
+                </div>
             </div>
 
             <div id="state-done" class="state-block" hidden>
@@ -205,6 +281,8 @@
                 </div>
 
                 <div id="pdf-notice" class="notice-box" hidden></div>
+                <div id="pdf-qa-summary" class="notice-box" hidden></div>
+                <div id="pdf-overflow-done" class="notice-box" hidden></div>
 
                 <div class="downloads-section">
                     <h3 class="sub-heading">Generated Files</h3>

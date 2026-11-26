@@ -3,6 +3,7 @@
 from .app import MathTranslateApp, run_gui
 from .controller import (
     GuiPreferences,
+    PdfTranslationController,
     QueueWriter,
     TranslationTaskRunner,
     normalize_arxiv_id,
@@ -12,6 +13,7 @@ from .controller import (
 __all__ = [
     "GuiPreferences",
     "MathTranslateApp",
+    "PdfTranslationController",
     "QueueWriter",
     "TranslationTaskRunner",
     "normalize_arxiv_id",

@@ -17,6 +17,12 @@ from mathtranslate import config as config_module
 from mathtranslate import utils
 from mathtranslate.config import config
 from mathtranslate.engines import AVAILABLE_ENGINES
+from mathtranslate.pdf_batch import (
+    BatchCheckpoint,
+    PdfBatchTranslator,
+    ScanPagesDetectedError,
+    inspect_pdf as _inspect_pdf,
+)
 from mathtranslate.pdf_compiler import compile_tex_to_pdf, compile_zip_to_pdf
 from mathtranslate.translate import translate_single_tex_file
 from mathtranslate.translate_arxiv import (
@@ -444,3 +450,203 @@ class TranslationTaskRunner:
             self.log_queue.put(f"[Error] {exc}")
         finally:
             self._emit_status(ok, message, callback)
+
+
+class PdfTranslationController:
+    """Headless-testable controller for layout-preserving PDF batch translation."""
+
+    def __init__(
+        self,
+        log_queue: Optional[queue.Queue[str]] = None,
+        status_queue: Optional[queue.Queue[tuple[bool, str]]] = None,
+    ) -> None:
+        self.log_queue: queue.Queue[str] = log_queue if log_queue is not None else queue.Queue()
+        self.status_queue: queue.Queue[tuple[bool, str]] = (
+            status_queue if status_queue is not None else queue.Queue()
+        )
+        self.progress_queue: queue.Queue[dict] = queue.Queue()
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        self._batch: Optional[PdfBatchTranslator] = None
+        self._work_dir: Optional[str] = None
+        self.last_checkpoint: Optional[BatchCheckpoint] = None
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def inspect(self, input_path: str) -> dict:
+        return _inspect_pdf(input_path, scan_pages_all=True)
+
+    def inspect_pdf(self, input_path: str) -> dict:
+        return self.inspect(input_path)
+
+    def _emit_status(
+        self,
+        ok: bool,
+        message: str,
+        callback: Optional[Callable[[bool, str], None]],
+    ) -> None:
+        self.status_queue.put((ok, message))
+        if callback is not None:
+            callback(ok, message)
+
+    def start(
+        self,
+        input_path: str,
+        output_path: str,
+        *,
+        work_dir: Optional[str] = None,
+        engine: str = "google",
+        l_from: str = "en",
+        l_to: str = "vi",
+        scan_policy: str = "abort",
+        glossary: Optional[dict[str, str]] = None,
+        threads: int = 0,
+        translator=None,
+        translator_factory=None,
+        on_progress: Optional[Callable] = None,
+        on_complete: Optional[Callable[[bool, str], None]] = None,
+    ) -> threading.Thread:
+        if not input_path or not os.path.isfile(input_path):
+            raise FileNotFoundError(f"Không tìm thấy file PDF đầu vào: {input_path}")
+        if not output_path:
+            raise ValueError("Đường dẫn file PDF đầu ra không được để trống.")
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("Một tác vụ dịch PDF khác đang chạy.")
+            resolved_work_dir = work_dir or os.path.join(
+                os.path.dirname(os.path.abspath(output_path)),
+                f".pdf_work_{os.path.splitext(os.path.basename(output_path))[0]}",
+            )
+            os.makedirs(resolved_work_dir, exist_ok=True)
+            self._work_dir = resolved_work_dir
+
+            def _progress_hook(cp: BatchCheckpoint) -> None:
+                completed = (
+                    len(cp.completed_pages)
+                    if isinstance(cp.completed_pages, (list, tuple, set))
+                    else int(cp.completed_pages or 0)
+                )
+                payload = {
+                    "completed_pages": completed,
+                    "total_pages": int(cp.total_pages or 0),
+                    "eta_seconds": cp.eta_seconds,
+                    "pages_per_sec": cp.pages_per_sec,
+                    "overflow_pages": list(cp.overflow_pages or []),
+                    "scan_pages": list(cp.scan_pages or []),
+                    "status": cp.status,
+                }
+                self.progress_queue.put(payload)
+                if on_progress is not None:
+                    on_progress(cp)
+
+            batch = PdfBatchTranslator(
+                input_path,
+                output_path,
+                resolved_work_dir,
+                engine=engine,
+                l_from=l_from,
+                l_to=l_to,
+                scan_policy=scan_policy,
+                glossary=glossary,
+                max_workers=max(1, threads) if threads else 2,
+                translator=translator,
+                translator_factory=translator_factory,
+                on_progress=_progress_hook,
+            )
+            self._batch = batch
+
+            def _worker() -> None:
+                ok = False
+                message = ""
+                try:
+                    with QueueWriter(self.log_queue):
+                        cp = batch.run()
+                    self.last_checkpoint = cp
+                    if cp.status == "cancelled":
+                        ok = False
+                        message = "Đã tạm dừng dịch PDF (có thể tiếp tục từ checkpoint)."
+                    elif cp.status == "completed":
+                        ok = True
+                        message = f"Dịch PDF hoàn tất: {output_path}"
+                    else:
+                        ok = False
+                        message = f"Dịch PDF kết thúc với trạng thái: {cp.status}"
+                except ScanPagesDetectedError as exc:
+                    ok = False
+                    message = str(exc)
+                    self.log_queue.put(f"[Scan] {exc}")
+                except Exception as exc:
+                    ok = False
+                    message = f"Lỗi dịch PDF: {exc}"
+                    self.log_queue.put(f"[Error] {exc}")
+                finally:
+                    self._emit_status(ok, message, on_complete)
+
+            thread = threading.Thread(target=_worker, daemon=True, name="mathtranslate-pdf-gui")
+            self._thread = thread
+            thread.start()
+            return thread
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._batch is not None:
+                self._batch.cancel()
+
+    def resume(
+        self,
+        work_dir: Optional[str] = None,
+        *,
+        on_progress: Optional[Callable] = None,
+        on_complete: Optional[Callable[[bool, str], None]] = None,
+    ) -> threading.Thread:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("Một tác vụ dịch PDF khác đang chạy.")
+            target_work_dir = work_dir or self._work_dir
+            if self._batch is None:
+                if not target_work_dir:
+                    raise RuntimeError("Không có checkpoint PDF để tiếp tục.")
+                self._batch = PdfBatchTranslator.from_checkpoint(
+                    target_work_dir,
+                    on_progress=on_progress,
+                )
+            batch = self._batch
+
+            def _worker() -> None:
+                ok = False
+                message = ""
+                try:
+                    with QueueWriter(self.log_queue):
+                        cp = batch.resume()
+                    self.last_checkpoint = cp
+                    if cp.status == "cancelled":
+                        ok = False
+                        message = "Đã tạm dừng dịch PDF."
+                    elif cp.status == "completed":
+                        ok = True
+                        message = f"Tiếp tục dịch PDF hoàn tất: {batch.output_path}"
+                    else:
+                        ok = False
+                        message = f"Dịch PDF kết thúc với trạng thái: {cp.status}"
+                except Exception as exc:
+                    ok = False
+                    message = f"Lỗi tiếp tục PDF: {exc}"
+                    self.log_queue.put(f"[Error] {exc}")
+                finally:
+                    self._emit_status(ok, message, on_complete)
+
+            thread = threading.Thread(target=_worker, daemon=True, name="mathtranslate-pdf-resume")
+            self._thread = thread
+            thread.start()
+            return thread
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        with self._lock:
+            thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout=timeout)
+        return not thread.is_alive()

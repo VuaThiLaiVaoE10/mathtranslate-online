@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import threading
 from typing import Callable, Literal
 
 import pymupdf
@@ -101,7 +102,20 @@ AMBIGUOUS_MATH_TERMS: dict[str, list[str]] = {
     "kernel": ["hạt nhân (hạch)", "nhân"],
     "rank": ["hạng (ma trận)", "bậc"],
     "manifold": ["đa tạp", "ống góp"],
+    "trace": ["vết (ma trận/toán tử)", "vết (đường đi)", "theo dấu"],
+    "order": ["bậc (phương trình/nhóm)", "thứ tự", "cấp"],
+    "degree": ["bậc (đa thức/đỉnh)", "độ (góc/nhiệt độ)"],
+    "spectrum": ["phổ (toán tử/ma trận)", "quang phổ"],
+    "norm": ["chuẩn (vectơ/không gian)", "định mức"],
+    "normal": ["pháp tuyến", "chuẩn tắc (nhóm con/phân phối)", "thông thường"],
+    "projection": ["phép chiếu", "hình chiếu", "dự phóng"],
+    "domain": ["miền xác định", "miền (đại số)", "lĩnh vực"],
+    "measure": ["độ đo", "phép đo", "biện pháp"],
+    "image": ["ảnh (ánh xạ)", "hình ảnh"],
 }
+_AMBIGUOUS_TERMS_RE = re.compile(
+    r"\b(" + "|".join(re.escape(t) for t in AMBIGUOUS_MATH_TERMS) + r")\b"
+)
 
 
 class ScanPagesDetectedError(RuntimeError):
@@ -268,16 +282,25 @@ def classify_pdf_pages(doc: pymupdf.Document) -> list[PageClassification]:
     return results
 
 
-def extract_ambiguous_terms(doc: pymupdf.Document, page_indices: list[int] | None = None) -> dict[str, list[str]]:
+def extract_ambiguous_terms(
+    doc: pymupdf.Document,
+    page_indices: list[int] | None = None,
+    *,
+    scan_pages_all: bool = False,
+) -> dict[str, list[str]]:
     """Detect recurring domain terms that have multiple Vietnamese translations."""
     counts: Counter[str] = Counter()
-    indices = page_indices if page_indices is not None else list(range(min(len(doc), 30)))
+    if page_indices is not None:
+        indices = [idx for idx in page_indices if 0 <= idx < len(doc)]
+    elif scan_pages_all:
+        indices = list(range(len(doc)))
+    else:
+        indices = list(range(min(len(doc), 30)))
+
     for idx in indices:
         txt = doc[idx].get_text("text").lower()
-        for term in AMBIGUOUS_MATH_TERMS:
-            hits = len(re.findall(rf"\b{re.escape(term)}\b", txt))
-            if hits:
-                counts[term] += hits
+        for m in _AMBIGUOUS_TERMS_RE.finditer(txt):
+            counts[m.group(1)] += 1
     return {term: AMBIGUOUS_MATH_TERMS[term] for term, cnt in counts.items() if cnt >= 2}
 
 
@@ -642,11 +665,44 @@ def _plan_page_blocks(
         family, dom_size, is_bold, is_italic, dom_color = _detect_block_style(prose_spans, body_size)
         align = "justify" if len(masked_text) > 120 and bbox.width > page.rect.width * 0.35 else "left"
 
+        # Coalesce adjacent same-line span rects (e.g. TOC dot-leaders) so apply_redactions stays O(lines).
+        # Cluster into y-bands first, then sort each band purely by x0 so small y0 jitter cannot reorder
+        # right-before-left spans and bridge across >24pt horizontal gaps.
+        y_bands: list[tuple[float, float, list[pymupdf.Rect]]] = []
+        for rr in sorted(redact_rects, key=lambda r: (r.y0, r.x0)):
+            placed = False
+            for idx_b in range(len(y_bands) - 1, -1, -1):
+                by0, by1, b_rects = y_bands[idx_b]
+                if rr.y0 - by0 > 3.0:
+                    break
+                if abs(by0 - rr.y0) <= 3.0 and abs(by1 - rr.y1) <= 3.0:
+                    b_rects.append(rr)
+                    placed = True
+                    break
+            if not placed:
+                y_bands.append((rr.y0, rr.y1, [rr]))
+
+        coalesced_rects: list[pymupdf.Rect] = []
+        for _, _, b_rects in y_bands:
+            band_coalesced: list[pymupdf.Rect] = []
+            for rr in sorted(b_rects, key=lambda r: (r.x0, r.x1)):
+                if (
+                    band_coalesced
+                    and abs(band_coalesced[-1].y0 - rr.y0) <= 3.0
+                    and abs(band_coalesced[-1].y1 - rr.y1) <= 3.0
+                    and rr.x0 - band_coalesced[-1].x1 <= 24.0
+                    and band_coalesced[-1].x0 - rr.x1 <= 24.0
+                ):
+                    band_coalesced[-1] = band_coalesced[-1] | rr
+                else:
+                    band_coalesced.append(pymupdf.Rect(rr))
+            coalesced_rects.extend(band_coalesced)
+
         plans.append(
             ProseBlockPlan(
                 block_index=blk_idx,
                 bbox=bbox,
-                redact_rects=redact_rects,
+                redact_rects=coalesced_rects,
                 masked_text=masked_text,
                 tokens=tokens,
                 font_family=family,
@@ -659,6 +715,120 @@ def _plan_page_blocks(
         )
 
     return plans, preserved_formula_blocks, inline_formulas_total
+
+
+def _merge_glossary(glossary: dict[str, str] | None) -> tuple[dict[str, str], set[str]]:
+    """Merge DEFAULT_EN_VI_GLOSSARY with user overrides case-insensitively."""
+    merged: dict[str, str] = {
+        k.strip(): v.strip()
+        for k, v in DEFAULT_EN_VI_GLOSSARY.items()
+        if k.strip() and v.strip()
+    }
+    user_keys_lower: set[str] = set()
+    if glossary:
+        for raw_k, raw_v in glossary.items():
+            k = str(raw_k).strip()
+            v = str(raw_v).strip()
+            if not k:
+                continue
+            for existing_k in [ek for ek in merged if ek.lower() == k.lower()]:
+                del merged[existing_k]
+            if v:
+                merged[k] = v
+                user_keys_lower.add(k.lower())
+    return merged, user_keys_lower
+
+
+def _extract_edge_prose_snippet(
+    page: pymupdf.Page,
+    edge: Literal["head", "tail"],
+    max_chars: int = 180,
+) -> str:
+    """Extract a lightweight (<1 ms) leading/trailing prose snippet from `page` without Pixmap crops."""
+    candidates: list[tuple[float, float, str]] = []
+    for blk in page.get_text("blocks"):
+        if len(blk) < 7 or blk[6] != 0:
+            continue
+        raw_txt = (blk[4] or "").strip()
+        if not raw_txt:
+            continue
+        bbox = pymupdf.Rect(blk[:4])
+        if _is_running_header_or_footer(bbox, raw_txt, page.rect):
+            continue
+        if len(ENGLISH_PROSE_WORD_RE.findall(raw_txt)) < 2:
+            continue
+        cleaned = re.sub(r"\s+", " ", raw_txt).strip()
+        candidates.append((round(float(blk[1]), 1), round(float(blk[0]), 1), cleaned))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    chosen = candidates[0][2] if edge == "head" else candidates[-1][2]
+    if len(chosen) <= max_chars:
+        return chosen
+    return chosen[:max_chars] if edge == "head" else chosen[-max_chars:]
+
+
+_LLM_TRANSLATE_ONLY_RE = re.compile(
+    r"(?:"
+    r"(?P<open>[*_]{2,3}|`{1,3}|[*_](?=[^\s\]]))[^\S\r\n]*\[Translate ONLY this paragraph\]"
+    r"(?:"
+    r"(?:[*_`]{1,3})(?=\s|:|$)[^\S\r\n]*:?"
+    r"|"
+    r"(?P=open)[^\S\r\n]*:?"
+    r"|"
+    r"[^\S\r\n]+(?:[*_`]{1,3})(?=\s|:|$)[^\S\r\n]*:?"
+    r"|"
+    r"[^\S\r\n]*:(?:[*_`]{1,3}(?=\s|$)|(?P=open)|[^\S\r\n]+[*_`]{1,3}(?=\s|$))"
+    r")"
+    r"|"
+    r"(?P<bopen>[*_])[^\S\r\n]+\[Translate ONLY this paragraph\][^\S\r\n]+(?P=bopen)(?=\s|:|$)[^\S\r\n]*:?"
+    r"|"
+    r"\[Translate ONLY this paragraph\][^\S\r\n]*:?"
+    r")(?:\s*:(?=\s|$))?\s*",
+    flags=re.IGNORECASE,
+)
+_LLM_PROMPT_HEADER_LINE_RE = re.compile(
+    r"^\s*(?:(?:[-*#+>]+|\d+[.)])[^\S\r\n]+)*(?:(?:[-*#+>]+|\d+[.)])[^\S\r\n]*)?"
+    r"(?:"
+    r"(?P<open>[*_]{1,3}|`{1,3})[^\S\r\n]*"
+    r"(?:"
+    r"Glossary[^\S\r\n]*(?::|(?P=open)[^\S\r\n]*:)"
+    r"|"
+    r"\[Context (?:before|after)[^\]]*\]"
+    r")"
+    r"|"
+    r"(?:Glossary[^\S\r\n]*:|\[Context (?:before|after)[^\]]*\])"
+    r")",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_llm_prompt_leaks(raw_out: str) -> str:
+    """Strip echoed context/glossary/instruction headers (including markdown-wrapped) from LLM outputs."""
+    text = raw_out.strip()
+    last_match = None
+    for match in _LLM_TRANSLATE_ONLY_RE.finditer(text):
+        last_match = match
+    if last_match is not None:
+        text = text[last_match.end():].strip()
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        if _LLM_PROMPT_HEADER_LINE_RE.match(line):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
+def _normalize_toc_levels(entries: list[list]) -> list[list]:
+    """Ensure TOC levels start at 1 and never jump by more than +1."""
+    normalized: list[list] = []
+    prev_lvl = 0
+    for entry in entries:
+        raw_lvl = int(entry[0]) if entry[0] is not None else 1
+        lvl = 1 if not normalized else max(1, min(raw_lvl, prev_lvl + 1))
+        prev_lvl = lvl
+        normalized.append([lvl, *entry[1:]])
+    return normalized
 
 
 def _apply_glossary_post(text: str, glossary: dict[str, str] | None) -> str:
@@ -677,12 +847,17 @@ def _translate_masked_blocks(
     glossary: dict[str, str] | None = None,
     cache_lookup: Callable[[str], str | None] | None = None,
     cache_store: Callable[[str, str], None] | None = None,
+    *,
+    prev_page_tail: str = "",
+    next_page_head: str = "",
 ) -> list[str]:
     """Translate prose blocks with neighbor context (for LLMs) and strict placeholder recovery."""
     is_llm = translator.engine in ("gemini", "openai", "ollama")
-    merged_glossary = dict(DEFAULT_EN_VI_GLOSSARY)
-    if glossary:
-        merged_glossary.update(glossary)
+    merged_glossary, user_keys_lower = _merge_glossary(glossary)
+    ordered_glossary = sorted(
+        merged_glossary.items(),
+        key=lambda kv: (0 if kv[0].lower() in user_keys_lower else 1, -len(kv[0]), kv[0].lower()),
+    )
 
     def _postprocess(plan: ProseBlockPlan, src: str, raw_out: str) -> str:
         cleaned = _apply_glossary_post(raw_out, merged_glossary)
@@ -707,27 +882,28 @@ def _translate_masked_blocks(
             if cached is not None:
                 return cached
 
-        if is_llm and len(plans) > 1:
-            prev_ctx = plans[i - 1].masked_text[:180] if i > 0 else ""
-            next_ctx = plans[i + 1].masked_text[:180] if i + 1 < len(plans) else ""
+        if is_llm:
+            prev_raw = plans[i - 1].masked_text if i > 0 else prev_page_tail
+            next_raw = plans[i + 1].masked_text if i + 1 < len(plans) else next_page_head
+            prev_ctx = re.sub(r"\s+", " ", prev_raw).strip()[-180:]
+            next_ctx = re.sub(r"\s+", " ", next_raw).strip()[:180]
             glossary_hits = [
                 f"{k} = {v}"
-                for k, v in merged_glossary.items()
-                if k.lower() in src.lower()
+                for k, v in ordered_glossary
+                if re.search(rf"\b{re.escape(k)}\b", src, flags=re.IGNORECASE)
             ]
             ctx_header = []
             if glossary_hits:
-                ctx_header.append("Glossary: " + "; ".join(glossary_hits[:8]))
+                ctx_header.append("Glossary: " + "; ".join(glossary_hits[:24]))
             if prev_ctx:
                 ctx_header.append(f"[Context before - do NOT output]: {prev_ctx}")
             if next_ctx:
                 ctx_header.append(f"[Context after - do NOT output]: {next_ctx}")
             if ctx_header:
                 prompt_text = "\n".join(ctx_header) + f"\n[Translate ONLY this paragraph]:\n{src}"
-                raw_out = translator.translate(prompt_text)
-                raw_out = re.sub(r"^\[Translate ONLY this paragraph\]:\s*", "", raw_out.strip(), flags=re.IGNORECASE)
+                raw_out = _strip_llm_prompt_leaks(translator.translate(prompt_text))
             else:
-                raw_out = translator.translate(src)
+                raw_out = _strip_llm_prompt_leaks(translator.translate(src))
         else:
             raw_out = translator.translate(src)
 
@@ -782,50 +958,53 @@ def _translate_masked_blocks(
 
 
 _FONT_CACHE: tuple[dict[str, bytes], str] | None = None
+_FONT_CACHE_LOCK = threading.Lock()
 
 
 def _build_font_archive_and_css() -> tuple[pymupdf.Archive, str]:
     """Create a lightweight PyMuPDF font archive with cached Vietnamese TrueType fonts."""
     global _FONT_CACHE
-    if _FONT_CACHE is None:
-        win_fonts = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
-        font_map: dict[str, bytes] = {}
-        if win_fonts.is_dir():
-            for fname in (
-                "times.ttf", "timesbd.ttf", "timesi.ttf", "timesbi.ttf",
-                "arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf",
-                "consola.ttf",
-            ):
-                fpath = win_fonts / fname
-                if fpath.is_file():
-                    font_map[fname] = fpath.read_bytes()
-            css = """
-            @font-face { font-family: MTSerif; src: url(times.ttf); }
-            @font-face { font-family: MTSerif; src: url(timesbd.ttf); font-weight: bold; }
-            @font-face { font-family: MTSerif; src: url(timesi.ttf); font-style: italic; }
-            @font-face { font-family: MTSerif; src: url(timesbi.ttf); font-weight: bold; font-style: italic; }
-            @font-face { font-family: MTSans; src: url(arial.ttf); }
-            @font-face { font-family: MTSans; src: url(arialbd.ttf); font-weight: bold; }
-            @font-face { font-family: MTSans; src: url(ariali.ttf); font-style: italic; }
-            @font-face { font-family: MTSans; src: url(arialbi.ttf); font-weight: bold; font-style: italic; }
-            @font-face { font-family: MTMono; src: url(consola.ttf); }
-            """
-        else:
-            for d in ("/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/TTF", "/Library/Fonts"):
-                if os.path.isdir(d):
-                    for fname in ("DejaVuSerif.ttf", "DejaVuSans.ttf", "DejaVuSansMono.ttf"):
-                        fp = Path(d) / fname
-                        if fp.is_file():
-                            font_map[fname] = fp.read_bytes()
-                    break
-            css = """
-            @font-face { font-family: MTSerif; src: url(DejaVuSerif.ttf); }
-            @font-face { font-family: MTSans; src: url(DejaVuSans.ttf); }
-            @font-face { font-family: MTMono; src: url(DejaVuSansMono.ttf); }
-            """
-        _FONT_CACHE = (font_map, css)
+    with _FONT_CACHE_LOCK:
+        if _FONT_CACHE is None:
+            win_fonts = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+            font_map: dict[str, bytes] = {}
+            if win_fonts.is_dir():
+                for fname in (
+                    "times.ttf", "timesbd.ttf", "timesi.ttf", "timesbi.ttf",
+                    "arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf",
+                    "consola.ttf",
+                ):
+                    fpath = win_fonts / fname
+                    if fpath.is_file():
+                        font_map[fname] = fpath.read_bytes()
+                css = """
+                @font-face { font-family: MTSerif; src: url(times.ttf); }
+                @font-face { font-family: MTSerif; src: url(timesbd.ttf); font-weight: bold; }
+                @font-face { font-family: MTSerif; src: url(timesi.ttf); font-style: italic; }
+                @font-face { font-family: MTSerif; src: url(timesbi.ttf); font-weight: bold; font-style: italic; }
+                @font-face { font-family: MTSans; src: url(arial.ttf); }
+                @font-face { font-family: MTSans; src: url(arialbd.ttf); font-weight: bold; }
+                @font-face { font-family: MTSans; src: url(ariali.ttf); font-style: italic; }
+                @font-face { font-family: MTSans; src: url(arialbi.ttf); font-weight: bold; font-style: italic; }
+                @font-face { font-family: MTMono; src: url(consola.ttf); }
+                """
+            else:
+                for d in ("/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/TTF", "/Library/Fonts"):
+                    if os.path.isdir(d):
+                        for fname in ("DejaVuSerif.ttf", "DejaVuSans.ttf", "DejaVuSansMono.ttf"):
+                            fp = Path(d) / fname
+                            if fp.is_file():
+                                font_map[fname] = fp.read_bytes()
+                        break
+                css = """
+                @font-face { font-family: MTSerif; src: url(DejaVuSerif.ttf); }
+                @font-face { font-family: MTSans; src: url(DejaVuSans.ttf); }
+                @font-face { font-family: MTMono; src: url(DejaVuSansMono.ttf); }
+                """
+            _FONT_CACHE = (font_map, css)
 
-    font_bytes, css = _FONT_CACHE
+        font_bytes, css = _FONT_CACHE
+
     arch = pymupdf.Archive()
     for fname, data in font_bytes.items():
         arch.add(data, fname)
@@ -863,21 +1042,47 @@ def translate_pdf_pages_in_doc(
     min_scale: float = 0.68,
     cache_lookup: Callable[[str], str | None] | None = None,
     cache_store: Callable[[str, str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> tuple[list[PageTranslationStats], list[int]]:
     """Translate `page_indices` in-place inside `doc`, preserving vector math, images, links, and TOC."""
     base_arch, font_css = _build_font_archive_and_css()
     stats_list: list[PageTranslationStats] = []
     flagged_pages: list[int] = []
+    is_llm = getattr(translator, "engine", "") in ("gemini", "openai", "ollama")
+    last_processed_pno = -2
+    last_english_tail = ""
 
     for pno in page_indices:
+        if cancel_check is not None and cancel_check():
+            break
+
         cls_info = classifications[pno]
         if cls_info.kind == "SCAN":
             stats_list.append(PageTranslationStats(page_index=pno, kind="SCAN"))
+            last_processed_pno = pno
+            last_english_tail = ""
             continue
 
         page = doc[pno]
         # Backup links on this page before redaction so internal/URI links are never lost
         saved_links = page.get_links()
+
+        prev_page_tail = ""
+        next_page_head = ""
+        current_english_tail = ""
+        if is_llm:
+            if pno > 0:
+                prev_cls = classifications.get(pno - 1)
+                if prev_cls is None or prev_cls.kind != "SCAN":
+                    if last_processed_pno == pno - 1:
+                        prev_page_tail = last_english_tail
+                    else:
+                        prev_page_tail = _extract_edge_prose_snippet(doc[pno - 1], "tail")
+            if pno + 1 < len(doc):
+                next_cls = classifications.get(pno + 1)
+                if next_cls is None or next_cls.kind != "SCAN":
+                    next_page_head = _extract_edge_prose_snippet(doc[pno + 1], "head")
+            current_english_tail = _extract_edge_prose_snippet(page, "tail")
 
         plans, preserved_cnt, inline_cnt = _plan_page_blocks(page)
         if not plans:
@@ -888,7 +1093,12 @@ def translate_pdf_pages_in_doc(
                     preserved_formula_blocks=preserved_cnt,
                 )
             )
+            last_processed_pno = pno
+            last_english_tail = current_english_tail
             continue
+
+        if is_llm and not current_english_tail:
+            current_english_tail = re.sub(r"\s+", " ", plans[-1].masked_text).strip()[-180:]
 
         translated_texts = _translate_masked_blocks(
             plans,
@@ -896,7 +1106,11 @@ def translate_pdf_pages_in_doc(
             glossary=glossary,
             cache_lookup=cache_lookup,
             cache_store=cache_store,
+            prev_page_tail=prev_page_tail,
+            next_page_head=next_page_head,
         )
+        last_processed_pno = pno
+        last_english_tail = current_english_tail
 
         # Register any inline formula PNG crops into a page-scoped archive
         page_arch, _ = _build_font_archive_and_css()
@@ -1020,6 +1234,8 @@ def translate_pdf_file(
     glossary: dict[str, str] | None = None,
     min_scale: float = 0.68,
     translator: TextTranslator | None = None,
+    cache_lookup: Callable[[str], str | None] | None = None,
+    cache_store: Callable[[str, str], None] | None = None,
 ) -> PdfTranslationResult:
     """Translate an entire PDF (or selected 0-based `pages`) preserving layout, math, links, and TOC."""
     src_doc = pymupdf.open(input_path)
@@ -1029,15 +1245,27 @@ def translate_pdf_file(
         all_cls = classify_pdf_pages(src_doc)
         cls_map = {c.page_index: c for c in all_cls}
 
-        target_pages = list(range(len(src_doc))) if pages is None else sorted(set(pages))
+        if pages is None:
+            target_pages = list(range(len(src_doc)))
+        else:
+            target_pages = sorted(set(pages))
+            invalid = [p for p in target_pages if p < 0 or p >= len(src_doc)]
+            if invalid:
+                raise ValueError(
+                    f"Page indices out of range [0, {len(src_doc) - 1}]: {invalid}"
+                )
+
         scan_in_targets = [p for p in target_pages if cls_map[p].kind == "SCAN"]
         if scan_in_targets and scan_policy == "abort":
+            raise ScanPagesDetectedError(scan_in_targets)
+
+        pages_to_run = [p for p in target_pages if cls_map[p].kind != "SCAN"]
+        if scan_policy == "skip" and scan_in_targets and len(src_doc) - len(scan_in_targets) <= 0:
             raise ScanPagesDetectedError(scan_in_targets)
 
         ambiguous = extract_ambiguous_terms(src_doc, target_pages)
         active_translator = translator if translator is not None else TextTranslator(engine, l_to, l_from)
 
-        pages_to_run = [p for p in target_pages if cls_map[p].kind != "SCAN"]
         stats, flagged = translate_pdf_pages_in_doc(
             src_doc,
             pages_to_run,
@@ -1045,10 +1273,32 @@ def translate_pdf_file(
             active_translator,
             glossary=glossary,
             min_scale=min_scale,
+            cache_lookup=cache_lookup,
+            cache_store=cache_store,
         )
 
-        # Preserve TOC/bookmarks and PDF metadata
-        if toc:
+        if scan_policy == "skip" and scan_in_targets:
+            deleted_set = set(scan_in_targets)
+            old_to_new_1based: dict[int, int] = {}
+            new_idx_1b = 1
+            for orig_idx in range(len(src_doc)):
+                if orig_idx not in deleted_set:
+                    old_to_new_1based[orig_idx + 1] = new_idx_1b
+                    new_idx_1b += 1
+            src_doc.delete_pages(sorted(deleted_set))
+            if toc:
+                remapped_toc = []
+                for entry in toc:
+                    lvl, title, p1 = entry[0], entry[1], entry[2]
+                    if p1 in old_to_new_1based:
+                        remapped_toc.append([lvl, title, old_to_new_1based[p1]])
+                remapped_toc = _normalize_toc_levels(remapped_toc)
+                try:
+                    src_doc.set_toc(remapped_toc)
+                except Exception:
+                    pass
+        elif toc:
+            # Preserve TOC/bookmarks and PDF metadata
             try:
                 src_doc.set_toc(toc)
             except Exception:
@@ -1059,7 +1309,7 @@ def translate_pdf_file(
         # Atomic write (.tmp -> os.replace) with subset font garbage collection
         out_abs = os.path.abspath(output_path)
         os.makedirs(os.path.dirname(out_abs) or ".", exist_ok=True)
-        tmp_path = f"{out_abs}.tmp_{os.getpid()}.pdf"
+        tmp_path = f"{out_abs}.tmp_{os.getpid()}_{threading.get_ident()}.pdf"
         try:
             src_doc.ez_save(tmp_path)
             os.replace(tmp_path, out_abs)

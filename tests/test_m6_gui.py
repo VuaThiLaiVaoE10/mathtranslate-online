@@ -268,7 +268,7 @@ def test_mathtranslate_app_instantiates_and_destroys_cleanly():
 
     try:
         tab_titles = [app.notebook.tab(tab_id, "text") for tab_id in app.notebook.tabs()]
-        assert tab_titles == ["ArXiv", "File .tex", "Project .zip", "Cài đặt"]
+        assert tab_titles == ["ArXiv", "File .tex", "Project .zip", "PDF Document (EN → VI)", "Cài đặt"]
         assert tuple(app.engine_combo["values"]) == AVAILABLE_ENGINES
         assert "(en)" in app.from_lang_var.get()
         assert "(vi)" in app.to_lang_var.get()

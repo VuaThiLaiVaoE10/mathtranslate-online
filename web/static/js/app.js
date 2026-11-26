@@ -14,6 +14,7 @@
         arxiv: "/api/translate/arxiv",
         tex: "/api/translate/tex",
         zip: "/api/translate/zip",
+        pdf: "/api/translate/pdf",
     };
 
     const form = document.getElementById("translate-form");
@@ -22,13 +23,19 @@
         arxiv: document.getElementById("panel-mode-arxiv"),
         tex: document.getElementById("panel-mode-tex"),
         zip: document.getElementById("panel-mode-zip"),
+        pdf: document.getElementById("panel-mode-pdf"),
     };
 
     const arxivInput = document.getElementById("arxiv-id");
     const texInput = document.getElementById("tex-file");
     const zipInput = document.getElementById("zip-file");
+    const pdfInput = document.getElementById("pdf-file");
     const texFilename = document.getElementById("tex-filename");
     const zipFilename = document.getElementById("zip-filename");
+    const pdfFilename = document.getElementById("pdf-filename");
+    const pdfInspectBox = document.getElementById("pdf-inspect-box");
+    const pdfInspectSummary = document.getElementById("pdf-inspect-summary");
+    const pdfGlossaryInput = document.getElementById("pdf-glossary");
     const engineSelect = document.getElementById("engine");
     const lFromSelect = document.getElementById("l-from");
     const lToSelect = document.getElementById("l-to");
@@ -46,12 +53,29 @@
     const stateBlocks = {
         idle: document.getElementById("state-idle"),
         running: document.getElementById("state-running"),
+        awaiting_scan: document.getElementById("state-awaiting-scan"),
+        cancelled: document.getElementById("state-cancelled"),
         done: document.getElementById("state-done"),
         error: document.getElementById("state-error"),
     };
     const runningSummary = document.getElementById("running-summary");
+    const pdfProgressBox = document.getElementById("pdf-progress-box");
+    const pdfProgressPages = document.getElementById("pdf-progress-pages");
+    const pdfProgressEta = document.getElementById("pdf-progress-eta");
+    const pdfProgressBar = document.getElementById("pdf-progress-bar");
+    const pdfOverflowLive = document.getElementById("pdf-overflow-live");
+    const pdfPartialLink = document.getElementById("pdf-partial-link");
+    const cancelJobBtn = document.getElementById("cancel-job-btn");
+    const scanPagesList = document.getElementById("scan-pages-list");
+    const scanKeepBtn = document.getElementById("scan-keep-btn");
+    const scanSkipBtn = document.getElementById("scan-skip-btn");
+    const scanCancelBtn = document.getElementById("scan-cancel-btn");
+    const resumeJobBtn = document.getElementById("resume-job-btn");
+    const pdfCancelledPartialLink = document.getElementById("pdf-cancelled-partial-link");
     const doneSummary = document.getElementById("done-summary");
     const pdfNotice = document.getElementById("pdf-notice");
+    const pdfQaSummary = document.getElementById("pdf-qa-summary");
+    const pdfOverflowDone = document.getElementById("pdf-overflow-done");
     const downloadList = document.getElementById("download-list");
     const errorSummary = document.getElementById("error-summary");
 
@@ -62,6 +86,7 @@
     let activeMode = "arxiv";
     let pollTimer = null;
     let activeJobId = null;
+    let inspectedUploadId = null;
 
     function formatBytes(bytes) {
         if (!Number.isFinite(bytes) || bytes < 1024) {
@@ -202,30 +227,161 @@
         });
     }
 
+    function formatEta(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) {
+            return "ETA: --";
+        }
+        const rounded = Math.ceil(seconds);
+        if (rounded < 60) {
+            return `ETA: ${rounded}s`;
+        }
+        const mins = Math.floor(rounded / 60);
+        const secs = rounded % 60;
+        return `ETA: ${mins}m ${secs}s`;
+    }
+
+    function parseGlossaryText(raw) {
+        const text = (raw || "").trim();
+        if (!text) {
+            return null;
+        }
+        if (text.startsWith("{")) {
+            return JSON.parse(text);
+        }
+        const glossary = {};
+        text.split(/\r?\n/).forEach((line) => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith("#")) {
+                return;
+            }
+            const sepIdx = trimmed.includes("=") ? trimmed.indexOf("=") : trimmed.indexOf(":");
+            if (sepIdx > 0) {
+                const k = trimmed.slice(0, sepIdx).trim();
+                const v = trimmed.slice(sepIdx + 1).trim();
+                if (k && v) {
+                    glossary[k] = v;
+                }
+            }
+        });
+        return Object.keys(glossary).length > 0 ? glossary : null;
+    }
+
+    async function inspectSelectedPdf(file) {
+        inspectedUploadId = null;
+        if (!file || !pdfInspectBox || !pdfInspectSummary) {
+            return;
+        }
+        pdfInspectBox.hidden = false;
+        pdfInspectSummary.textContent = "Inspecting PDF pages and terminology...";
+        const fd = new FormData();
+        fd.append("file", file);
+        try {
+            const resp = await fetch("/api/pdf/inspect", { method: "POST", body: fd });
+            const info = await resp.json();
+            if (!resp.ok) {
+                throw new Error(info.error || "Inspection failed");
+            }
+            inspectedUploadId = info.upload_id || null;
+            const counts = info.counts || {};
+            const scanPages = info.scan_pages || [];
+            const scanText = scanPages.length > 0
+                ? `Scan pages detected (no auto-OCR): ${scanPages.join(", ")}`
+                : "No scanned pages detected.";
+            pdfInspectSummary.textContent =
+                `Pages: ${info.total_pages || 0} (TEXT: ${counts.TEXT || 0}, SCAN: ${counts.SCAN || 0}, MIXED: ${counts.MIXED || 0}). ${scanText}`;
+            if (pdfGlossaryInput && !pdfGlossaryInput.value.trim()) {
+                const merged = Object.assign({}, info.default_glossary || {});
+                if (Object.keys(merged).length > 0) {
+                    pdfGlossaryInput.value = JSON.stringify(merged, null, 2);
+                }
+            }
+        } catch (err) {
+            pdfInspectSummary.textContent = `Inspection warning: ${err.message}`;
+        }
+    }
+
     function renderJob(job) {
+        if (!job) {
+            return;
+        }
+
         jobIdBadge.textContent = `job:${job.id}`;
         jobIdBadge.hidden = false;
         jobMetaCaption.textContent = `Mode: ${job.mode.toUpperCase()} | Engine: ${job.engine} | ${job.l_from} -> ${job.l_to}`;
 
-        const wasAtBottom = jobLog.scrollTop + jobLog.clientHeight >= jobLog.scrollHeight - 24;
-        jobLog.textContent = job.log || "";
-        if (wasAtBottom || job.status === "running" || job.status === "queued") {
+        if (job.log) {
+            logContainer.hidden = false;
+            jobLog.textContent = job.log;
             jobLog.scrollTop = jobLog.scrollHeight;
+        }
+
+        if (job.status === "awaiting_scan") {
+            stopPolling();
+            setBusy(false);
+            setPanelState("awaiting_scan", "Awaiting Scan Choice");
+            const scanPages = job.scan_pages || [];
+            if (scanPagesList) {
+                scanPagesList.textContent = `Scanned pages (1-based): ${scanPages.join(", ")}. Automatic OCR is disabled.`;
+            }
+            return;
+        }
+
+        if (job.status === "cancelled") {
+            stopPolling();
+            setBusy(false);
+            setPanelState("cancelled", "Cancelled");
+            if (pdfCancelledPartialLink) {
+                if (job.partial_available) {
+                    pdfCancelledPartialLink.href = `/download/${encodeURIComponent(job.id)}/partial.pdf`;
+                    pdfCancelledPartialLink.hidden = false;
+                } else {
+                    pdfCancelledPartialLink.hidden = true;
+                }
+            }
+            return;
         }
 
         if (job.status === "queued" || job.status === "running") {
             setPanelState("running", job.status === "queued" ? "Queued" : "Running");
             runningSummary.textContent =
                 job.status === "queued"
-                    ? "Job accepted and waiting for an available translation worker."
+                    ? "Job queued. Waiting for an available worker..."
                     : `Translating via ${job.engine} (${job.l_from} -> ${job.l_to})...`;
+
+            if (pdfProgressBox && job.mode === "pdf") {
+                pdfProgressBox.hidden = false;
+                const prog = job.progress || {};
+                const completed = prog.completed_pages || 0;
+                const total = prog.total_pages || 0;
+                const pct = Number.isFinite(prog.percent) ? prog.percent : 0;
+                pdfProgressPages.textContent = `${completed} / ${total} pages (${pct.toFixed(1)}%)`;
+                pdfProgressEta.textContent = formatEta(prog.eta_seconds);
+                pdfProgressBar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+
+                const overflow = job.overflow_pages || [];
+                if (overflow.length > 0) {
+                    pdfOverflowLive.hidden = false;
+                    pdfOverflowLive.textContent = `Overflow pages needing review: ${overflow.join(", ")}`;
+                } else {
+                    pdfOverflowLive.hidden = true;
+                }
+
+                if (job.partial_available) {
+                    pdfPartialLink.href = `/download/${encodeURIComponent(job.id)}/partial.pdf`;
+                    pdfPartialLink.hidden = false;
+                } else {
+                    pdfPartialLink.hidden = true;
+                }
+            } else if (pdfProgressBox) {
+                pdfProgressBox.hidden = true;
+            }
             return;
         }
 
         stopPolling();
         setBusy(false);
 
-        if (job.status === "done") {
+        if (job.status === "done" || job.status === "completed") {
             setPanelState("done", "Completed");
             const fileCount = (job.files || []).length;
             doneSummary.textContent =
@@ -239,6 +395,29 @@
             } else {
                 pdfNotice.hidden = true;
                 pdfNotice.textContent = "";
+            }
+
+            if (pdfQaSummary) {
+                if (job.qa_report) {
+                    const qa = job.qa_report;
+                    pdfQaSummary.hidden = false;
+                    pdfQaSummary.textContent =
+                        `QA Report: pages=${qa.output_pages || "?"}/${qa.input_pages || "?"}, ` +
+                        `placeholders_leaked=${qa.placeholders_leaked || 0}, ` +
+                        `overflow_pages=${(qa.overflow_pages || []).length}`;
+                } else {
+                    pdfQaSummary.hidden = true;
+                }
+            }
+
+            if (pdfOverflowDone) {
+                const overflow = job.overflow_pages || [];
+                if (overflow.length > 0) {
+                    pdfOverflowDone.hidden = false;
+                    pdfOverflowDone.textContent = `Overflow pages flagged for manual check: ${overflow.join(", ")}`;
+                } else {
+                    pdfOverflowDone.hidden = true;
+                }
             }
 
             renderDownloads(job.id, job.files || []);
@@ -354,6 +533,27 @@
                 return;
             }
             formData.append("file", file);
+        } else if (activeMode === "pdf") {
+            const file = pdfInput && pdfInput.files && pdfInput.files[0];
+            if (!file && !inspectedUploadId) {
+                showFormError("Please select a .pdf file to translate.");
+                return;
+            }
+            if (inspectedUploadId) {
+                formData.append("upload_id", inspectedUploadId);
+            } else if (file) {
+                formData.append("file", file);
+            }
+            formData.append("scan_policy", "abort");
+            try {
+                const parsedGlossary = parseGlossaryText(pdfGlossaryInput ? pdfGlossaryInput.value : "");
+                if (parsedGlossary) {
+                    formData.append("glossary", JSON.stringify(parsedGlossary));
+                }
+            } catch (gErr) {
+                showFormError(`Invalid glossary JSON: ${gErr.message}`);
+                return;
+            }
         }
 
         stopPolling();
@@ -411,8 +611,76 @@
         }
     });
 
+    async function sendScanChoice(choice) {
+        if (!activeJobId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`/api/jobs/${encodeURIComponent(activeJobId)}/scan-choice`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ choice }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                throw new Error(data.error || "Failed to submit scan choice");
+            }
+            if (data.status === "cancelled") {
+                pollJob(activeJobId);
+            } else {
+                setBusy(true);
+                pollJob(activeJobId);
+            }
+        } catch (err) {
+            showFormError(err.message);
+        }
+    }
+
+    if (cancelJobBtn) {
+        cancelJobBtn.addEventListener("click", async () => {
+            if (!activeJobId) {
+                return;
+            }
+            await fetch(`/api/jobs/${encodeURIComponent(activeJobId)}/cancel`, { method: "POST" });
+            pollJob(activeJobId);
+        });
+    }
+
+    if (resumeJobBtn) {
+        resumeJobBtn.addEventListener("click", async () => {
+            if (!activeJobId) {
+                return;
+            }
+            setBusy(true);
+            await fetch(`/api/jobs/${encodeURIComponent(activeJobId)}/resume`, { method: "POST" });
+            pollJob(activeJobId);
+        });
+    }
+
+    if (scanKeepBtn) {
+        scanKeepBtn.addEventListener("click", () => sendScanChoice("keep_original"));
+    }
+    if (scanSkipBtn) {
+        scanSkipBtn.addEventListener("click", () => sendScanChoice("skip"));
+    }
+    if (scanCancelBtn) {
+        scanCancelBtn.addEventListener("click", () => sendScanChoice("cancel"));
+    }
+
+    if (pdfInput) {
+        pdfInput.addEventListener("change", () => {
+            const file = pdfInput.files && pdfInput.files[0];
+            if (file) {
+                inspectSelectedPdf(file);
+            }
+        });
+    }
+
     setupDropzone("tex", texInput, texFilename, ".tex", "or drop a file here");
     setupDropzone("zip", zipInput, zipFilename, ".zip", "or drop an archive here");
+    if (pdfInput && pdfFilename) {
+        setupDropzone("pdf", pdfInput, pdfFilename, ".pdf", "or drop a PDF here");
+    }
     form.addEventListener("submit", handleSubmit);
     hydrateMeta();
 })();

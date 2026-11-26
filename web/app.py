@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -21,6 +22,7 @@ from werkzeug.utils import secure_filename
 
 from mathtranslate import __version__
 from mathtranslate.engines import AVAILABLE_ENGINES
+from mathtranslate.pdf_batch import BatchCheckpoint, PdfBatchTranslator, inspect_pdf
 from mathtranslate.pdf_compiler import compile_tex_to_pdf, compile_zip_to_pdf
 from mathtranslate.translate import translate_single_tex_file
 from mathtranslate.translate_arxiv import (
@@ -233,8 +235,26 @@ def _create_job(mode: str, params: dict[str, Any]) -> tuple[str, str, str]:
         "pdf_status": None,
         "pdf_message": None,
         "error": None,
+        "progress": {
+            "completed_pages": 0,
+            "total_pages": 0,
+            "percent": 0.0,
+            "current_batch": 0,
+            "total_batches": 0,
+            "pages_per_sec": 0.0,
+            "eta_seconds": None,
+        },
+        "scan_pages": [],
+        "overflow_pages": [],
+        "partial_available": False,
+        "qa_report": None,
+        "scan_policy": params.get("scan_policy", "abort"),
+        "glossary": params.get("glossary"),
         "_job_dir": job_dir,
         "_output_dir": output_dir,
+        "_input_path": None,
+        "_output_filename": None,
+        "_pdf_translator": None,
     }
     with JOBS_LOCK:
         JOBS[job_id] = record
@@ -260,6 +280,25 @@ def _update_job(job_id: str, **fields: Any) -> None:
 
 
 def _serialize_job(job: dict[str, Any]) -> dict[str, Any]:
+    output_dir = job.get("_output_dir") or ""
+    files = list(job["files"])
+    partial_available = bool(
+        output_dir and os.path.isfile(os.path.join(output_dir, "partial.pdf"))
+    )
+    if partial_available and "partial.pdf" not in files:
+        files.append("partial.pdf")
+    qa_report = job.get("qa_report")
+    if qa_report is None and output_dir:
+        qa_path = os.path.join(output_dir, "qa_report.json")
+        if os.path.isfile(qa_path):
+            try:
+                with open(qa_path, "r", encoding="utf-8") as fh:
+                    qa_report = json.load(fh)
+            except Exception:
+                qa_report = None
+    if output_dir and os.path.isfile(os.path.join(output_dir, "qa_report.json")):
+        if "qa_report.json" not in files:
+            files.append("qa_report.json")
     return {
         "id": job["id"],
         "status": job["status"],
@@ -271,10 +310,15 @@ def _serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         "created_at": job["created_at"],
         "updated_at": job["updated_at"],
         "log": job["log"],
-        "files": list(job["files"]),
+        "files": files,
         "pdf_status": job["pdf_status"],
         "pdf_message": job["pdf_message"],
         "error": job["error"],
+        "progress": dict(job.get("progress") or {}),
+        "scan_pages": list(job.get("scan_pages") or []),
+        "overflow_pages": list(job.get("overflow_pages") or []),
+        "partial_available": partial_available,
+        "qa_report": qa_report,
     }
 
 
@@ -635,6 +679,375 @@ def api_translate_zip():
 
     EXECUTOR.submit(_run_zip_job, job_id, input_path, output_dir, output_filename, params)
     return jsonify({"job_id": job_id, "status": "queued", "mode": "zip"}), 202
+
+
+@app.route("/api/pdf/inspect", methods=["POST"])
+def api_pdf_inspect():
+    uploaded = request.files.get("file") or request.files.get("pdf_file")
+    if uploaded is None or not uploaded.filename:
+        return jsonify({"error": "Please select a .pdf file to inspect."}), 400
+
+    safe_name = _sanitize_upload_filename(uploaded.filename, ".pdf", "document")
+    if safe_name is None:
+        return jsonify({"error": "Only .pdf files are accepted in PDF mode."}), 400
+
+    upload_id = uuid.uuid4().hex[:12]
+    upload_dir = os.path.join(_ensure_jobs_root(), f"upload_{upload_id}")
+    os.makedirs(upload_dir, exist_ok=True)
+    pdf_path = os.path.join(upload_dir, safe_name)
+    uploaded.save(pdf_path)
+
+    try:
+        info = inspect_pdf(pdf_path, scan_pages_all=True)
+    except Exception as exc:
+        return jsonify({"error": f"Failed to inspect PDF: {exc}"}), 400
+
+    return jsonify(
+        {
+            "upload_id": upload_id,
+            "filename": safe_name,
+            "total_pages": info.get("total_pages", 0),
+            "counts": info.get("counts", {}),
+            "scan_pages": info.get("scan_pages", []),
+            "classifications": info.get("classifications", []),
+            "ambiguous_terms": info.get("ambiguous_terms", {}),
+            "default_glossary": info.get("default_glossary", {}),
+        }
+    )
+
+
+def _find_uploaded_pdf(upload_id: str) -> str | None:
+    if not _JOB_ID_RE.match(upload_id or ""):
+        return None
+    upload_dir = os.path.join(_ensure_jobs_root(), f"upload_{upload_id}")
+    if not os.path.isdir(upload_dir):
+        return None
+    for name in os.listdir(upload_dir):
+        if name.lower().endswith(".pdf"):
+            return os.path.join(upload_dir, name)
+    return None
+
+
+@app.route("/api/translate/pdf", methods=["POST"])
+def api_translate_pdf():
+    params, err = _validate_translation_params()
+    if err is not None:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    scan_policy = (
+        request.form.get("scan_policy")
+        or data.get("scan_policy")
+        or "abort"
+    ).strip().lower()
+    if scan_policy not in {"abort", "keep_original", "skip"}:
+        return jsonify({"error": "Invalid scan_policy. Expected abort, keep_original, or skip."}), 400
+
+    raw_glossary = request.form.get("glossary") or data.get("glossary")
+    glossary: dict[str, str] | None = None
+    if isinstance(raw_glossary, dict):
+        glossary = {str(k): str(v) for k, v in raw_glossary.items()}
+    elif isinstance(raw_glossary, str) and raw_glossary.strip():
+        try:
+            parsed_glossary = json.loads(raw_glossary)
+            if isinstance(parsed_glossary, dict):
+                glossary = {str(k): str(v) for k, v in parsed_glossary.items()}
+        except json.JSONDecodeError:
+            return jsonify({"error": "Invalid glossary JSON."}), 400
+
+    params["scan_policy"] = scan_policy
+    params["glossary"] = glossary
+
+    uploaded = request.files.get("file") or request.files.get("pdf_file")
+    upload_id = (request.form.get("upload_id") or data.get("upload_id") or "").strip()
+
+    job_id, input_dir, output_dir = _create_job("pdf", params)
+    if uploaded is not None and uploaded.filename:
+        safe_name = _sanitize_upload_filename(uploaded.filename, ".pdf", "document")
+        if safe_name is None:
+            return jsonify({"error": "Only .pdf files are accepted in PDF mode."}), 400
+        input_path = os.path.join(input_dir, safe_name)
+        uploaded.save(input_path)
+    elif upload_id:
+        existing_pdf = _find_uploaded_pdf(upload_id)
+        if existing_pdf is None or not os.path.isfile(existing_pdf):
+            return jsonify({"error": "Uploaded PDF not found or expired."}), 404
+        safe_name = os.path.basename(existing_pdf)
+        input_path = os.path.join(input_dir, safe_name)
+        shutil.copy2(existing_pdf, input_path)
+    else:
+        return jsonify({"error": "Please select a .pdf file to upload."}), 400
+
+    stem = os.path.splitext(safe_name)[0]
+    output_filename = f"{stem}_translated.pdf"
+    _update_job(job_id, _input_path=input_path, _output_filename=output_filename)
+
+    try:
+        info = inspect_pdf(input_path, scan_pages_all=True)
+    except Exception as exc:
+        _update_job(job_id, status="failed", error=f"Failed to inspect PDF: {exc}")
+        return jsonify({"error": f"Failed to inspect PDF: {exc}"}), 400
+
+    scan_pages = list(info.get("scan_pages") or [])
+    total_pages = int(info.get("total_pages", 0) or 0)
+    initial_progress = {
+        "completed_pages": 0,
+        "total_pages": total_pages,
+        "percent": 0.0,
+        "current_batch": 0,
+        "total_batches": 0,
+        "pages_per_sec": 0.0,
+        "eta_seconds": None,
+    }
+    _update_job(job_id, scan_pages=scan_pages, progress=initial_progress)
+
+    if scan_pages and scan_policy == "abort":
+        _append_log(
+            job_id,
+            f"[pdf] Detected scanned pages {scan_pages}; awaiting user scan-choice.\n",
+        )
+        _update_job(job_id, status="awaiting_scan")
+        return (
+            jsonify(
+                {
+                    "job_id": job_id,
+                    "status": "awaiting_scan",
+                    "mode": "pdf",
+                    "scan_pages": scan_pages,
+                }
+            ),
+            202,
+        )
+
+    EXECUTOR.submit(_run_pdf_job, job_id, resume=False)
+    return jsonify({"job_id": job_id, "status": "queued", "mode": "pdf"}), 202
+
+
+@app.route("/api/jobs/<job_id>/scan-choice", methods=["POST"])
+def api_job_scan_choice(job_id: str):
+    if not _JOB_ID_RE.match(job_id or ""):
+        return jsonify({"error": "Invalid job ID."}), 400
+    data = request.get_json(silent=True) or {}
+    choice = (data.get("choice") or request.form.get("choice") or "").strip().lower()
+    if choice not in {"keep_original", "skip", "cancel"}:
+        return jsonify({"error": "Invalid choice. Expected keep_original, skip, or cancel."}), 400
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return jsonify({"error": "Job not found."}), 404
+        if choice == "cancel":
+            job["status"] = "cancelled"
+            job["updated_at"] = time.time()
+            job["log"] += "[pdf] Scan-page prompt cancelled by user.\n"
+            return jsonify({"job_id": job_id, "status": "cancelled"})
+        job["scan_policy"] = choice
+        job["status"] = "queued"
+        job["updated_at"] = time.time()
+        job["log"] += f"[pdf] User chose scan_policy={choice}; starting translation.\n"
+
+    EXECUTOR.submit(_run_pdf_job, job_id, resume=False)
+    return jsonify({"job_id": job_id, "status": "queued", "scan_policy": choice})
+
+
+@app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
+def api_job_cancel(job_id: str):
+    if not _JOB_ID_RE.match(job_id or ""):
+        return jsonify({"error": "Invalid job ID."}), 400
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return jsonify({"error": "Job not found."}), 404
+        runner = job.get("_pdf_translator")
+        if runner is not None:
+            try:
+                runner.cancel()
+            except Exception:
+                pass
+        job["status"] = "cancelled"
+        job["updated_at"] = time.time()
+        job["log"] += "[pdf] Cancellation requested.\n"
+    return jsonify({"job_id": job_id, "status": "cancelled"})
+
+
+@app.route("/api/jobs/<job_id>/resume", methods=["POST"])
+def api_job_resume(job_id: str):
+    if not _JOB_ID_RE.match(job_id or ""):
+        return jsonify({"error": "Invalid job ID."}), 400
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return jsonify({"error": "Job not found."}), 404
+        if job.get("mode") != "pdf":
+            return jsonify({"error": "Resume is only supported for PDF jobs."}), 400
+        job["status"] = "running"
+        job["updated_at"] = time.time()
+    EXECUTOR.submit(_run_pdf_job, job_id, resume=True)
+    return jsonify({"job_id": job_id, "status": "running"})
+
+
+def _checkpoint_to_progress(cp: Any) -> tuple[dict[str, Any], list[int], list[int]]:
+    if isinstance(cp, dict):
+        completed_raw = cp.get("completed_pages", 0)
+        total_pages = int(cp.get("total_pages", 0) or 0)
+        batches = cp.get("batches") or []
+        completed_batches = cp.get("completed_batches") or []
+        pages_per_sec = float(cp.get("pages_per_sec", 0.0) or 0.0)
+        eta_seconds = cp.get("eta_seconds")
+        overflow_pages = list(cp.get("overflow_pages") or [])
+        scan_pages = list(cp.get("scan_pages") or [])
+    else:
+        completed_raw = getattr(cp, "completed_pages", 0)
+        total_pages = int(getattr(cp, "total_pages", 0) or 0)
+        batches = getattr(cp, "batches", None) or []
+        completed_batches = getattr(cp, "completed_batches", None) or []
+        pages_per_sec = float(getattr(cp, "pages_per_sec", 0.0) or 0.0)
+        eta_seconds = getattr(cp, "eta_seconds", None)
+        overflow_pages = list(getattr(cp, "overflow_pages", None) or [])
+        scan_pages = list(getattr(cp, "scan_pages", None) or [])
+
+    completed_count = (
+        len(completed_raw)
+        if isinstance(completed_raw, (list, tuple, set))
+        else int(completed_raw or 0)
+    )
+    percent = round((completed_count / total_pages) * 100.0, 1) if total_pages > 0 else 0.0
+    progress = {
+        "completed_pages": completed_count,
+        "total_pages": total_pages,
+        "percent": percent,
+        "current_batch": len(completed_batches) if isinstance(completed_batches, (list, tuple, set)) else int(completed_batches or 0),
+        "total_batches": len(batches) if isinstance(batches, (list, tuple, set)) else int(batches or 0),
+        "pages_per_sec": round(pages_per_sec, 3),
+        "eta_seconds": round(float(eta_seconds), 1) if eta_seconds is not None else None,
+    }
+    return progress, overflow_pages, scan_pages
+
+
+def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return
+        input_path = job["_input_path"]
+        output_dir = job["_output_dir"]
+        output_filename = job["_output_filename"]
+        scan_policy = job.get("scan_policy", "abort")
+        glossary = job.get("glossary")
+        engine = job["engine"]
+        l_from = job["l_from"]
+        l_to = job["l_to"]
+        existing_runner = job.get("_pdf_translator")
+
+    _update_job(job_id, status="running", error=None)
+    output_path = os.path.join(output_dir, output_filename)
+
+    def _on_progress(cp: Any) -> None:
+        progress, overflow_pages, scan_pages = _checkpoint_to_progress(cp)
+        partial_available = os.path.isfile(os.path.join(output_dir, "partial.pdf"))
+        _update_job(
+            job_id,
+            progress=progress,
+            overflow_pages=overflow_pages,
+            scan_pages=scan_pages,
+            partial_available=partial_available,
+        )
+
+    try:
+        with _capture_thread_output(lambda chunk: _append_log(job_id, chunk)):
+            if resume and existing_runner is not None:
+                _append_log(job_id, "[pdf] Resuming PDF batch translation...\n")
+                cp = existing_runner.resume()
+            elif resume and os.path.isfile(os.path.join(output_dir, "checkpoint.json")):
+                _append_log(job_id, "[pdf] Resuming PDF batch translation from checkpoint...\n")
+                runner = PdfBatchTranslator.from_checkpoint(
+                    output_dir,
+                    on_progress=_on_progress,
+                )
+                _update_job(job_id, _pdf_translator=runner)
+                cp = runner.resume()
+            else:
+                _append_log(
+                    job_id,
+                    f"[pdf] Starting batch translation ({os.path.basename(input_path)}, scan_policy={scan_policy})...\n",
+                )
+                runner = PdfBatchTranslator(
+                    input_path,
+                    output_path,
+                    output_dir,
+                    engine=engine,
+                    l_from=l_from,
+                    l_to=l_to,
+                    scan_policy=scan_policy,
+                    glossary=glossary,
+                    on_progress=_on_progress,
+                    job_id=job_id,
+                )
+                _update_job(job_id, _pdf_translator=runner)
+                cp = runner.run()
+
+        progress, overflow_pages, scan_pages = _checkpoint_to_progress(cp)
+        cp_status = getattr(cp, "status", "completed")
+        files: list[str] = []
+        if os.path.isfile(output_path):
+            files.append(output_filename)
+        if os.path.isfile(os.path.join(output_dir, "partial.pdf")):
+            files.append("partial.pdf")
+        qa_report = None
+        qa_path = os.path.join(output_dir, "qa_report.json")
+        if os.path.isfile(qa_path):
+            files.append("qa_report.json")
+            try:
+                with open(qa_path, "r", encoding="utf-8") as fh:
+                    qa_report = json.load(fh)
+            except Exception:
+                qa_report = None
+
+        if cp_status == "cancelled":
+            _append_log(job_id, "[pdf] Translation cancelled.\n")
+            _update_job(
+                job_id,
+                status="cancelled",
+                progress=progress,
+                overflow_pages=overflow_pages,
+                scan_pages=scan_pages,
+                files=files,
+                qa_report=qa_report,
+            )
+        elif cp_status == "completed":
+            _append_log(
+                job_id,
+                f"[pdf] Completed {progress['completed_pages']}/{progress['total_pages']} pages.\n",
+            )
+            _update_job(
+                job_id,
+                status="done",
+                progress=progress,
+                overflow_pages=overflow_pages,
+                scan_pages=scan_pages,
+                files=files,
+                qa_report=qa_report,
+                pdf_status="success",
+                pdf_message=(
+                    f"Translated {progress['completed_pages']}/{progress['total_pages']} pages."
+                ),
+            )
+        else:
+            err_msg = f"PDF batch translation ended with status: {cp_status}"
+            _append_log(job_id, f"[error] {err_msg}\n")
+            _update_job(
+                job_id,
+                status="error",
+                error=err_msg,
+                progress=progress,
+                overflow_pages=overflow_pages,
+                scan_pages=scan_pages,
+                files=files,
+                qa_report=qa_report,
+            )
+    except Exception as exc:
+        _append_log(job_id, f"[error] {exc}\n{traceback.format_exc()}\n")
+        _update_job(job_id, status="error", error=str(exc))
 
 
 @app.route("/api/jobs/<job_id>", methods=["GET"])

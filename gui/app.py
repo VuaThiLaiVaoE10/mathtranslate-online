@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import sys
@@ -13,6 +14,7 @@ from mathtranslate.engines import AVAILABLE_ENGINES
 
 from .controller import (
     GuiPreferences,
+    PdfTranslationController,
     TranslationTaskRunner,
     normalize_arxiv_id,
     parse_language_options,
@@ -78,12 +80,37 @@ class MathTranslateApp(tk.Tk):
         self.tex_out_var = tk.StringVar()
         self.zip_in_var = tk.StringVar()
         self.zip_out_var = tk.StringVar()
+        self.pdf_in_var = tk.StringVar()
+        self.pdf_out_var = tk.StringVar()
+        self.pdf_scan_policy_var = tk.StringVar(value="abort")
+        self.pdf_progress_var = tk.StringVar(value="Tiến độ PDF: 0 / 0 trang")
+        self.pdf_eta_var = tk.StringVar(value="ETA: --")
+        self.pdf_overflow_var = tk.StringVar(value="Trang tràn chữ: Không có")
+        self.pdf_controller = PdfTranslationController(
+            log_queue=self.log_queue,
+            status_queue=self.status_queue,
+        )
 
         self.status_var = tk.StringVar(value="Sẵn sàng.")
         self._translate_buttons: list[ttk.Button] = []
         self._poll_after_id: Optional[str] = None
 
         self._build_ui()
+        while True:
+            try:
+                prog = self.pdf_controller.progress_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.pdf_progress_var.set(
+                f"Tiến độ PDF: {prog.get('completed_pages', 0)} / {prog.get('total_pages', 0)} trang"
+            )
+            eta = prog.get("eta_seconds")
+            self.pdf_eta_var.set(f"ETA: {eta:.1f}s" if isinstance(eta, (int, float)) else "ETA: --")
+            overflow = prog.get("overflow_pages") or []
+            self.pdf_overflow_var.set(
+                f"Trang tràn chữ: {', '.join(map(str, overflow))}" if overflow else "Trang tràn chữ: Không có"
+            )
+
         self._poll_after_id = self.after(self.POLL_INTERVAL_MS, self._poll_queues)
 
     def _configure_theme_and_fonts(self) -> None:
@@ -129,6 +156,7 @@ class MathTranslateApp(tk.Tk):
         self._build_arxiv_tab()
         self._build_tex_tab()
         self._build_zip_tab()
+        self._build_pdf_tab()
         self._build_settings_tab()
 
         log_frame = self._build_log_panel(paned)
@@ -268,6 +296,63 @@ class MathTranslateApp(tk.Tk):
         )
         btn.grid(row=3, column=1, sticky="w", pady=(2, 4))
         self._translate_buttons.append(btn)
+
+    def _build_pdf_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=14)
+        tab.columnconfigure(1, weight=1)
+        self.notebook.add(tab, text="PDF Document (EN → VI)")
+
+        self._add_path_row(
+            tab,
+            row=0,
+            label_text="File .pdf đầu vào:",
+            var=self.pdf_in_var,
+            browse_cmd=self._browse_pdf_input,
+            browse_label="Chọn PDF...",
+            extra_cmd=self._on_inspect_pdf,
+            extra_label="Kiểm tra",
+        )
+        self._add_path_row(
+            tab,
+            row=1,
+            label_text="File .pdf đầu ra:",
+            var=self.pdf_out_var,
+            browse_cmd=self._browse_pdf_output,
+            browse_label="Lưu thành...",
+        )
+
+        ttk.Label(tab, text="Trang scan (không tự OCR):").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=6)
+        scan_combo = ttk.Combobox(
+            tab,
+            textvariable=self.pdf_scan_policy_var,
+            values=["abort", "keep_original", "skip"],
+            state="readonly",
+            width=18,
+        )
+        scan_combo.grid(row=2, column=1, sticky="w", pady=6)
+
+        ttk.Label(tab, text="Glossary (JSON):").grid(row=3, column=0, sticky="nw", padx=(0, 8), pady=6)
+        self.pdf_glossary_text = tk.Text(tab, height=3, width=48, font=self._mono_font)
+        self.pdf_glossary_text.grid(row=3, column=1, columnspan=2, sticky="ew", pady=6)
+
+        info_row = ttk.Frame(tab)
+        info_row.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(2, 6))
+        ttk.Label(info_row, textvariable=self.pdf_progress_var).pack(side=tk.LEFT)
+        ttk.Label(info_row, textvariable=self.pdf_eta_var).pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(info_row, textvariable=self.pdf_overflow_var).pack(side=tk.LEFT, padx=(16, 0))
+
+        btn_row = ttk.Frame(tab)
+        btn_row.grid(row=5, column=1, sticky="w", pady=(4, 4))
+        btn_start = ttk.Button(
+            btn_row,
+            text="Dịch PDF",
+            style="Accent.TButton",
+            command=self._on_translate_pdf,
+        )
+        btn_start.pack(side=tk.LEFT)
+        self._translate_buttons.append(btn_start)
+        ttk.Button(btn_row, text="Hủy (Cancel)", command=self._on_cancel_pdf).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(btn_row, text="Tiếp tục (Resume)", command=self._on_resume_pdf).pack(side=tk.LEFT, padx=(8, 0))
 
     def _build_settings_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=14)
@@ -422,6 +507,102 @@ class MathTranslateApp(tk.Tk):
         if path:
             self.commands_file_var.set(path)
 
+    def _browse_pdf_input(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Chọn file .pdf cần dịch",
+            filetypes=[("PDF documents", "*.pdf"), ("All files", "*.*")],
+        )
+        if path:
+            self.pdf_in_var.set(path)
+            if not self.pdf_out_var.get().strip():
+                stem, _ = os.path.splitext(path)
+                self.pdf_out_var.set(f"{stem}_translated.pdf")
+
+    def _browse_pdf_output(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Chọn nơi lưu file .pdf đã dịch",
+            defaultextension=".pdf",
+            filetypes=[("PDF documents", "*.pdf"), ("All files", "*.*")],
+        )
+        if path:
+            self.pdf_out_var.set(path)
+
+    def _on_inspect_pdf(self) -> None:
+        in_path = self.pdf_in_var.get().strip()
+        if not in_path or not os.path.isfile(in_path):
+            messagebox.showwarning("Thiếu thông tin", "Vui lòng chọn file .pdf đầu vào hợp lệ.")
+            return
+        try:
+            info = self.pdf_controller.inspect(in_path)
+        except Exception as exc:
+            messagebox.showerror("Lỗi kiểm tra PDF", str(exc))
+            return
+        counts = info.get("counts", {})
+        scan_pages = info.get("scan_pages", [])
+        self._append_log(
+            f"[PDF Inspect] {info.get('total_pages', 0)} trang "
+            f"(TEXT={counts.get('TEXT', 0)}, SCAN={counts.get('SCAN', 0)}, MIXED={counts.get('MIXED', 0)}), "
+            f"scan_pages={scan_pages}"
+        )
+        default_glossary = info.get("default_glossary") or {}
+        if default_glossary and not self.pdf_glossary_text.get("1.0", tk.END).strip():
+            self.pdf_glossary_text.insert("1.0", json.dumps(default_glossary, ensure_ascii=False, indent=2))
+        if scan_pages:
+            messagebox.showwarning(
+                "Phát hiện trang scan",
+                f"Các trang scan (không tự OCR): {scan_pages}. Chọn scan_policy=keep_original hoặc skip để tiếp tục.",
+            )
+
+    def _on_translate_pdf(self) -> None:
+        in_path = self.pdf_in_var.get().strip()
+        out_path = self.pdf_out_var.get().strip()
+        if not in_path or not os.path.isfile(in_path):
+            messagebox.showwarning("Thiếu thông tin", "Vui lòng chọn file .pdf đầu vào hợp lệ.")
+            return
+        if not out_path:
+            messagebox.showwarning("Thiếu thông tin", "Vui lòng chọn đường dẫn file .pdf đầu ra.")
+            return
+        if self.pdf_controller.is_running or self.runner.is_running:
+            messagebox.showinfo("Đang chạy", "Một tác vụ dịch khác đang chạy.")
+            return
+        glossary = None
+        raw_glossary = self.pdf_glossary_text.get("1.0", tk.END).strip()
+        if raw_glossary:
+            try:
+                parsed = json.loads(raw_glossary)
+                if isinstance(parsed, dict):
+                    glossary = {str(k): str(v) for k, v in parsed.items()}
+            except json.JSONDecodeError as exc:
+                messagebox.showerror("Lỗi Glossary JSON", str(exc))
+                return
+        prefs = self._collect_current_preferences()
+        self._set_running_state(True, "Đang dịch PDF...")
+        self.pdf_controller.start(
+            in_path,
+            out_path,
+            engine=prefs.engine,
+            l_from=prefs.l_from,
+            l_to=prefs.l_to,
+            scan_policy=self.pdf_scan_policy_var.get().strip() or "abort",
+            glossary=glossary,
+            threads=prefs.threads,
+        )
+
+    def _on_cancel_pdf(self) -> None:
+        self.pdf_controller.cancel()
+        self._append_log("[PDF] Đã gửi yêu cầu hủy.")
+
+    def _on_resume_pdf(self) -> None:
+        if self.pdf_controller.is_running:
+            messagebox.showinfo("Đang chạy", "Tác vụ PDF vẫn đang chạy.")
+            return
+        try:
+            self._set_running_state(True, "Đang tiếp tục dịch PDF...")
+            self.pdf_controller.resume()
+        except Exception as exc:
+            self._set_running_state(False, f"Lỗi: {exc}")
+            messagebox.showerror("Không thể tiếp tục", str(exc))
+
     # --- Settings & Translation Actions ---
 
     def _collect_current_preferences(self) -> GuiPreferences:
@@ -545,6 +726,21 @@ class MathTranslateApp(tk.Tk):
             status_prefix = "Hoàn tất" if ok else "Thất bại"
             self._set_running_state(False, f"{status_prefix}: {message}")
             self._append_log(f"[{status_prefix}] {message}")
+
+        while True:
+            try:
+                prog = self.pdf_controller.progress_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.pdf_progress_var.set(
+                f"Tiến độ PDF: {prog.get('completed_pages', 0)} / {prog.get('total_pages', 0)} trang"
+            )
+            eta = prog.get("eta_seconds")
+            self.pdf_eta_var.set(f"ETA: {eta:.1f}s" if isinstance(eta, (int, float)) else "ETA: --")
+            overflow = prog.get("overflow_pages") or []
+            self.pdf_overflow_var.set(
+                f"Trang tràn chữ: {', '.join(map(str, overflow))}" if overflow else "Trang tràn chữ: Không có"
+            )
 
         self._poll_after_id = self.after(self.POLL_INTERVAL_MS, self._poll_queues)
 

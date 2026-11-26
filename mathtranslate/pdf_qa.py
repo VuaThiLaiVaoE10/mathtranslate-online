@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import os
+from pathlib import Path
 import re
-from typing import Literal
+import threading
+from typing import Any, Literal
 
 import pymupdf
 
@@ -35,6 +38,18 @@ class PageVerification:
     has_vietnamese_diacritics: bool
     notes: list[str] = field(default_factory=list)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "page_index": self.page_index,
+            "status": self.status,
+            "orig_images": self.orig_images,
+            "out_images": self.out_images,
+            "leaked_placeholders": list(self.leaked_placeholders),
+            "formula_similarity": self.formula_similarity,
+            "has_vietnamese_diacritics": self.has_vietnamese_diacritics,
+            "notes": list(self.notes),
+        }
+
 
 @dataclass
 class PdfVerificationReport:
@@ -45,6 +60,46 @@ class PdfVerificationReport:
     toc_preserved: bool
     pages: list[PageVerification]
     rendered_comparisons: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        pass_count = sum(1 for p in self.pages if p.status == "PASS")
+        warn_count = sum(1 for p in self.pages if p.status == "WARN")
+        fail_count = sum(1 for p in self.pages if p.status == "FAIL")
+        return {
+            "passed": self.passed,
+            "orig_pages": self.orig_pages,
+            "out_pages": self.out_pages,
+            "page_count_match": self.page_count_match,
+            "toc_preserved": self.toc_preserved,
+            "summary": {
+                "total_checked": len(self.pages),
+                "pass_count": pass_count,
+                "warn_count": warn_count,
+                "fail_count": fail_count,
+                "fail_pages": [p.page_index for p in self.pages if p.status == "FAIL"],
+                "warn_pages": [p.page_index for p in self.pages if p.status == "WARN"],
+            },
+            "pages": [p.to_dict() for p in self.pages],
+            "rendered_comparisons": list(self.rendered_comparisons),
+        }
+
+
+def save_qa_report_json(report: PdfVerificationReport, dest_path: str | Path) -> str:
+    """Atomically write `report.to_dict()` as UTF-8 JSON to `dest_path`."""
+    dest_abs = os.path.abspath(str(dest_path))
+    os.makedirs(os.path.dirname(dest_abs) or ".", exist_ok=True)
+    tmp_path = f"{dest_abs}.tmp_{os.getpid()}_{threading.get_ident()}.json"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(report.to_dict(), f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, dest_abs)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    return dest_abs
 
 
 def _find_standalone_formula_rects(page: pymupdf.Page) -> list[pymupdf.Rect]:
@@ -146,6 +201,8 @@ def verify_translated_pdf(
     flagged_overflow_pages: list[int] | None = None,
     render_dir: str | None = None,
     expect_vietnamese: bool = True,
+    require_page_count_match: bool = True,
+    page_pairs: list[tuple[int, int]] | None = None,
 ) -> PdfVerificationReport:
     """Run all mandatory QA checks comparing `out_pdf_path` against `orig_pdf_path`."""
     flagged_set = set(flagged_overflow_pages or [])
@@ -155,21 +212,32 @@ def verify_translated_pdf(
         orig_n = len(orig_doc)
         out_n = len(out_doc)
         page_count_match = orig_n == out_n
+        count_fail = require_page_count_match and (not page_count_match)
         toc_preserved = len(out_doc.get_toc()) == len(orig_doc.get_toc())
 
-        indices = checked_pages if checked_pages is not None else list(range(min(orig_n, out_n)))
+        if page_pairs is not None:
+            pairs = [(op, tp) for op, tp in page_pairs if 0 <= op < orig_n and 0 <= tp < out_n]
+            if checked_pages is not None:
+                checked_set = set(checked_pages)
+                pairs = [pair for pair in pairs if pair[0] in checked_set]
+        else:
+            indices = checked_pages if checked_pages is not None else list(range(min(orig_n, out_n)))
+            pairs = [(pno, pno) for pno in indices if 0 <= pno < orig_n and 0 <= pno < out_n]
+
         page_reports: list[PageVerification] = []
         rendered_paths: list[str] = []
 
-        for pno in indices:
-            if pno >= orig_n or pno >= out_n:
-                continue
-            p_orig = orig_doc[pno]
-            p_out = out_doc[pno]
+        for orig_pno, out_pno in pairs:
+            p_orig = orig_doc[orig_pno]
+            p_out = out_doc[out_pno]
             notes: list[str] = []
 
             # 1. Page size parity
-            if abs(p_orig.rect.width - p_out.rect.width) > 0.5 or abs(p_orig.rect.height - p_out.rect.height) > 0.5:
+            size_mismatch = (
+                abs(p_orig.rect.width - p_out.rect.width) > 0.5
+                or abs(p_orig.rect.height - p_out.rect.height) > 0.5
+            )
+            if size_mismatch:
                 notes.append(f"Page size mismatch: {p_orig.rect} vs {p_out.rect}")
 
             # 2. Image count parity (out_images >= orig_images because inline cropped formulas may add images)
@@ -203,11 +271,12 @@ def verify_translated_pdf(
             if formula_sim < 0.94:
                 notes.append(f"Formula visual similarity dropped to {formula_sim:.3f}")
 
-            if pno in flagged_set:
+            if orig_pno in flagged_set:
                 notes.append("Auto-shrunk below min_scale to prevent text truncation (flagged for review)")
 
             hard_fail = (
-                (not page_count_match)
+                count_fail
+                or size_mismatch
                 or (out_imgs < orig_imgs)
                 or bool(leaks)
                 or ("\ufffd" in out_text)
@@ -223,7 +292,7 @@ def verify_translated_pdf(
 
             page_reports.append(
                 PageVerification(
-                    page_index=pno,
+                    page_index=orig_pno,
                     status=status,
                     orig_images=orig_imgs,
                     out_images=out_imgs,
@@ -235,11 +304,11 @@ def verify_translated_pdf(
             )
 
             if render_dir is not None:
-                png_path = os.path.join(render_dir, f"compare_page_{pno + 1:03d}.png")
+                png_path = os.path.join(render_dir, f"compare_page_{orig_pno + 1:03d}.png")
                 render_side_by_side_png(p_orig, p_out, png_path, dpi=140)
                 rendered_paths.append(png_path)
 
-        overall_pass = page_count_match and all(r.status != "FAIL" for r in page_reports)
+        overall_pass = (not count_fail) and all(r.status != "FAIL" for r in page_reports)
         return PdfVerificationReport(
             passed=overall_pass,
             orig_pages=orig_n,
