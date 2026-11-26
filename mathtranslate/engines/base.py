@@ -94,8 +94,8 @@ def build_academic_system_prompt(
         f"and in formal academic style.\n"
         f"CRITICAL RULES:\n"
         f"1. Keep EVERY placeholder token matching `{math_code}...` (for example `{math_code}_0`, "
-        f"`{math_code}_1_2`, `{math_code}_12`) EXACTLY verbatim in its corresponding grammatical "
-        f"position. Never translate, alter, split, delete, or reorder `{math_code}...` tokens.\n"
+        f"`{math_code}_1_2`, `{math_code}_12`, and paragraph separator `{math_code}SEP`) EXACTLY verbatim "
+        f"in its corresponding position. Never translate, alter, split, delete, or reorder `{math_code}...` tokens.\n"
         f"2. Preserve line breaks and paragraph structure.\n"
         f"3. Output ONLY the translated text without any explanations, markdown fences, or notes."
     )

@@ -702,6 +702,11 @@ def api_pdf_inspect():
 
     try:
         info = inspect_pdf(pdf_path, scan_pages_all=True)
+        try:
+            with open(os.path.join(upload_dir, "inspect_cache.json"), "w", encoding="utf-8") as cf:
+                json.dump(info, cf)
+        except Exception:
+            pass
     except Exception as exc:
         return jsonify({"error": f"Failed to inspect PDF: {exc}"}), 400
 
@@ -815,8 +820,18 @@ def api_translate_pdf():
     output_filename = f"{stem}_translated.pdf"
     _update_job(job_id, _input_path=input_path, _output_filename=output_filename)
 
+    cached_info = None
+    if upload_id and not raw_page_range:
+        cache_file = os.path.join(_ensure_jobs_root(), f"upload_{upload_id}", "inspect_cache.json")
+        if os.path.isfile(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as cf:
+                    cached_info = json.load(cf)
+            except Exception:
+                cached_info = None
+
     try:
-        info = inspect_pdf(input_path, scan_pages_all=True)
+        info = cached_info if cached_info is not None else inspect_pdf(input_path, scan_pages_all=True)
     except Exception as exc:
         _update_job(job_id, status="failed", error=f"Failed to inspect PDF: {exc}")
         return jsonify({"error": f"Failed to inspect PDF: {exc}"}), 400
@@ -1012,6 +1027,12 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     f"[pdf] Starting batch translation ({os.path.basename(input_path)}, scan_policy={scan_policy})...\n",
                 )
                 low_mem = os.environ.get("MATHTRANSLATE_LOW_MEM", "").strip() in {"1", "true", "yes"}
+                expected_pages = int((job.get("progress") or {}).get("total_pages") or 0)
+                if low_mem:
+                    opt_workers = 1 if (engine == "google" or expected_pages > 150) else 2
+                else:
+                    cpu_workers = min(4, max(2, os.cpu_count() or 2))
+                    opt_workers = 2 if engine == "google" else cpu_workers
                 runner = PdfBatchTranslator(
                     input_path,
                     output_path,
@@ -1021,7 +1042,7 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     l_to=l_to,
                     scan_policy=scan_policy,
                     glossary=glossary,
-                    max_workers=1 if (engine in {"google", "gemini"} or low_mem) else 2,
+                    max_workers=opt_workers,
                     max_retries=6 if engine == "gemini" else 4,
                     base_backoff=2.0 if engine == "gemini" else 0.5,
                     translator_factory=custom_factory,

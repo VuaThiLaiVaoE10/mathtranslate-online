@@ -909,8 +909,8 @@ def _translate_masked_blocks(
 
         return _postprocess(plan, src, raw_out)
 
-    # For NMT engines (google/deepl/tencent), batch multiple blocks per HTTP call (~15x fewer requests, avoids HTTP 429)
-    if not is_llm and len(plans) > 1:
+    # Batch multiple blocks per HTTP call (~15x fewer requests for both NMT and LLMs)
+    if len(plans) > 1:
         outputs: list[str | None] = [None] * len(plans)
         pending: list[tuple[int, ProseBlockPlan, str]] = []
         for i, plan in enumerate(plans):
@@ -924,11 +924,12 @@ def _translate_masked_blocks(
 
         sep = "\n\nXMATHXSEP\n\n"
         sep_split_re = re.compile(r"\s*XMATHXSEP\s*", re.IGNORECASE)
+        max_batch_chars = 3800 if is_llm else 2200
         cur_batch: list[tuple[int, ProseBlockPlan, str]] = []
         cur_len = 0
         batches: list[list[tuple[int, ProseBlockPlan, str]]] = []
         for item in pending:
-            if cur_batch and cur_len + len(item[2]) + len(sep) > 2200:
+            if cur_batch and cur_len + len(item[2]) + len(sep) > max_batch_chars:
                 batches.append(cur_batch)
                 cur_batch = []
                 cur_len = 0
@@ -943,7 +944,33 @@ def _translate_masked_blocks(
                 outputs[idx0] = _translate_one((idx0, plan0))
                 continue
             joined = sep.join(x[2] for x in batch)
-            raw_batch = translator.translate(joined)
+            if is_llm:
+                first_i = batch[0][0]
+                last_i = batch[-1][0]
+                prev_raw = plans[first_i - 1].masked_text if first_i > 0 else prev_page_tail
+                next_raw = plans[last_i + 1].masked_text if last_i + 1 < len(plans) else next_page_head
+                prev_ctx = re.sub(r"\s+", " ", prev_raw).strip()[-180:]
+                next_ctx = re.sub(r"\s+", " ", next_raw).strip()[:180]
+                glossary_hits = [
+                    f"{k} = {v}"
+                    for k, v in ordered_glossary
+                    if re.search(rf"\b{re.escape(k)}\b", joined, flags=re.IGNORECASE)
+                ]
+                ctx_header = []
+                if glossary_hits:
+                    ctx_header.append("Glossary: " + "; ".join(glossary_hits[:24]))
+                if prev_ctx:
+                    ctx_header.append(f"[Context before - do NOT output]: {prev_ctx}")
+                if next_ctx:
+                    ctx_header.append(f"[Context after - do NOT output]: {next_ctx}")
+                if ctx_header:
+                    prompt_text = "\n".join(ctx_header) + f"\n[Translate ONLY this paragraph]:\n{joined}"
+                    raw_batch = _strip_llm_prompt_leaks(translator.translate(prompt_text))
+                else:
+                    raw_batch = _strip_llm_prompt_leaks(translator.translate(joined))
+            else:
+                raw_batch = translator.translate(joined)
+
             pieces = sep_split_re.split(raw_batch)
             if len(pieces) == len(batch):
                 for (b_idx, b_plan, b_src), piece in zip(batch, pieces):
@@ -1112,12 +1139,20 @@ def translate_pdf_pages_in_doc(
         last_processed_pno = pno
         last_english_tail = current_english_tail
 
-        # Register any inline formula PNG crops into a page-scoped archive
-        page_arch, _ = _build_font_archive_and_css()
-        for plan in plans:
-            for tok in plan.tokens:
-                if tok.kind == "image" and tok.png_name and tok.png_bytes:
-                    page_arch.add(tok.png_bytes, tok.png_name)
+        # Reuse shared base_arch unless this page has inline PNG formula crops
+        has_inline_images = any(
+            tok.kind == "image" and tok.png_name and tok.png_bytes
+            for plan in plans
+            for tok in plan.tokens
+        )
+        if has_inline_images:
+            page_arch, _ = _build_font_archive_and_css()
+            for plan in plans:
+                for tok in plan.tokens:
+                    if tok.kind == "image" and tok.png_name and tok.png_bytes:
+                        page_arch.add(tok.png_bytes, tok.png_name)
+        else:
+            page_arch = base_arch
 
         # Step 5a: Transparent text-only redaction on ONLY the prose spans
         for plan in plans:
