@@ -267,6 +267,7 @@ def _create_job(mode: str, params: dict[str, Any]) -> tuple[str, str, str]:
         "_input_path": None,
         "_output_filename": None,
         "_pdf_translator": None,
+        "_pdf_lock": threading.Lock(),
         "_api_key": params.get("api_key"),
         "_api_key_2": params.get("api_key_2"),
         "_api_base_url": params.get("api_base_url"),
@@ -1015,18 +1016,62 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
         job = JOBS.get(job_id)
         if job is None:
             return
-        input_path = job["_input_path"]
-        output_dir = job["_output_dir"]
-        output_filename = job["_output_filename"]
-        scan_policy = job.get("scan_policy", "abort")
-        glossary = job.get("glossary")
-        engine = job["engine"]
-        l_from = job["l_from"]
-        l_to = job["l_to"]
-        existing_runner = job.get("_pdf_translator")
-        api_key = job.get("_api_key")
-        api_key_2 = job.get("_api_key_2")
-        api_base_url = job.get("_api_base_url")
+        pdf_lock = job.get("_pdf_lock")
+
+    with pdf_lock if pdf_lock is not None else threading.Lock():
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                return
+            input_path = job["_input_path"]
+            output_dir = job["_output_dir"]
+            output_filename = job["_output_filename"]
+            scan_policy = job.get("scan_policy", "abort")
+            glossary = job.get("glossary")
+            engine = job["engine"]
+            l_from = job["l_from"]
+            l_to = job["l_to"]
+            existing_runner = job.get("_pdf_translator")
+            api_key = job.get("_api_key")
+            api_key_2 = job.get("_api_key_2")
+            api_base_url = job.get("_api_base_url")
+        _run_pdf_job_locked(
+            job_id,
+            resume=resume,
+            input_path=input_path,
+            output_dir=output_dir,
+            output_filename=output_filename,
+            scan_policy=scan_policy,
+            glossary=glossary,
+            engine=engine,
+            l_from=l_from,
+            l_to=l_to,
+            existing_runner=existing_runner,
+            api_key=api_key,
+            api_key_2=api_key_2,
+            api_base_url=api_base_url,
+            expected_pages=int((job.get("progress") or {}).get("total_pages") or 0),
+        )
+
+
+def _run_pdf_job_locked(
+    job_id: str,
+    *,
+    resume: bool,
+    input_path: str,
+    output_dir: str,
+    output_filename: str,
+    scan_policy: str,
+    glossary: Any,
+    engine: str,
+    l_from: str,
+    l_to: str,
+    existing_runner: Any,
+    api_key: str | None,
+    api_key_2: str | None,
+    api_base_url: str | None,
+    expected_pages: int,
+) -> None:
 
     _update_job(job_id, status="running", error=None)
     output_path = os.path.join(output_dir, output_filename)
@@ -1101,7 +1146,6 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     f"[pdf] Starting batch translation ({os.path.basename(input_path)}, scan_policy={scan_policy})...\n",
                 )
                 low_mem = os.environ.get("MATHTRANSLATE_LOW_MEM", "").strip() in {"1", "true", "yes"}
-                expected_pages = int((job.get("progress") or {}).get("total_pages") or 0)
                 if low_mem:
                     opt_workers = 1 if engine == "google" else 2
                 else:
