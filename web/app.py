@@ -172,12 +172,20 @@ def _validate_translation_params() -> tuple[dict[str, Any] | None, tuple[Any, in
 
     compile_pdf = _parse_bool(_get_payload_field("compile_pdf", False), default=False)
     api_key = str(_get_payload_field("api_key", "") or "").strip() or None
+    api_base_url = str(_get_payload_field("api_base_url", "") or "").strip() or None
+    if api_base_url:
+        if not (api_base_url.startswith("https://") or api_base_url.startswith("http://")):
+            return None, (jsonify({"error": "Invalid API Base URL. Must start with http:// or https://"}), 400)
+        # If user pasted a full generateContent or chat/completions URL, trim to base prefix
+        api_base_url = re.sub(r"/[^/]+:generateContent/?$", "", api_base_url)
+        api_base_url = re.sub(r"/chat/completions/?$", "", api_base_url).rstrip("/")
     return {
         "engine": engine,
         "l_from": l_from,
         "l_to": l_to,
         "compile_pdf": compile_pdf,
         "api_key": api_key,
+        "api_base_url": api_base_url,
     }, None
 
 
@@ -258,6 +266,7 @@ def _create_job(mode: str, params: dict[str, Any]) -> tuple[str, str, str]:
         "_output_filename": None,
         "_pdf_translator": None,
         "_api_key": params.get("api_key"),
+        "_api_base_url": params.get("api_base_url"),
     }
     with JOBS_LOCK:
         JOBS[job_id] = record
@@ -1003,12 +1012,18 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
         l_to = job["l_to"]
         existing_runner = job.get("_pdf_translator")
         api_key = job.get("_api_key")
+        api_base_url = job.get("_api_base_url")
 
     _update_job(job_id, status="running", error=None)
     output_path = os.path.join(output_dir, output_filename)
+    engine_kwargs: dict[str, Any] = {}
+    if api_key:
+        engine_kwargs["api_key"] = api_key
+    if api_base_url:
+        engine_kwargs["base_url"] = api_base_url
     custom_factory = (
-        (lambda: TextTranslator(engine, l_to, l_from, api_key=api_key))
-        if api_key
+        (lambda: TextTranslator(engine, l_to, l_from, **engine_kwargs))
+        if engine_kwargs
         else None
     )
 

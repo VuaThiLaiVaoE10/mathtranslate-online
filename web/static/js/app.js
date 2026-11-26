@@ -40,6 +40,7 @@
     const engineSelect = document.getElementById("engine");
     const apiKeyField = document.getElementById("api-key-field");
     const apiKeyInput = document.getElementById("api-key");
+    const apiBaseUrlInput = document.getElementById("api-base-url");
     const lFromSelect = document.getElementById("l-from");
     const lToSelect = document.getElementById("l-to");
     const swapLangBtn = document.getElementById("swap-lang-btn");
@@ -585,6 +586,9 @@
         formData.append("engine", engineSelect.value);
         if (apiKeyInput && apiKeyInput.value.trim()) {
             formData.append("api_key", apiKeyInput.value.trim());
+        }
+        if (apiBaseUrlInput && apiBaseUrlInput.value.trim()) {
+            formData.append("api_base_url", apiBaseUrlInput.value.trim());
         }
         formData.append("l_from", lFromSelect.value);
         formData.append("l_to", lToSelect.value);

@@ -110,6 +110,11 @@ class GeminiTranslator(BaseTranslator):
             "Content-Type": "application/json",
             "x-goog-api-key": self.api_key,
         }
+        gen_cfg: dict = {
+            "temperature": self.temperature,
+        }
+        if "2.5" in self.model:
+            gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
         payload = {
             "systemInstruction": {
                 "parts": [{"text": system_prompt}],
@@ -120,9 +125,7 @@ class GeminiTranslator(BaseTranslator):
                     "parts": [{"text": text}],
                 }
             ],
-            "generationConfig": {
-                "temperature": self.temperature,
-            },
+            "generationConfig": gen_cfg,
         }
         self._pace_request()
         response = requests.post(
@@ -131,6 +134,15 @@ class GeminiTranslator(BaseTranslator):
             json=payload,
             timeout=self.timeout,
         )
+        if response.status_code == 400 and "thinkingConfig" in gen_cfg:
+            gen_cfg.pop("thinkingConfig", None)
+            self._pace_request()
+            response = requests.post(
+                self.endpoint,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
         if response.status_code == 404:
             tried = {self.model}
             for candidate in self.FALLBACK_MODELS:

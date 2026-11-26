@@ -173,7 +173,16 @@
                         placeholder="Paste API key (e.g. AIza... from Google AI Studio)"
                         autocomplete="off"
                     >
-                    <p class="field-hint">Recommended for math-heavy PDFs: Gemini Flash preserves inline symbol positions and avoids free-scrape 429 limits.</p>
+                    <p class="field-hint">Official endpoint URL is built-in (no URL needed for Google AI Studio keys). Leave URL below blank unless using a custom proxy.</p>
+                    <label for="api-base-url" class="field-label" style="margin-top: 8px;">API Link / Base URL (optional)</label>
+                    <input
+                        type="url"
+                        id="api-base-url"
+                        name="api_base_url"
+                        class="input-control input-mono"
+                        placeholder="Optional: leave blank unless using a custom proxy URL"
+                        autocomplete="off"
+                    >
                 </div>
 
                 <div class="lang-grid">
