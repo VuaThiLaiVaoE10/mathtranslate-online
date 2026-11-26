@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: mathtranslate-online
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/meta
+    envVars:
+      - key: MATHTRANSLATE_HOST
+        value: 0.0.0.0
+      - key: MATHTRANSLATE_LOW_MEM
+        value: "1"

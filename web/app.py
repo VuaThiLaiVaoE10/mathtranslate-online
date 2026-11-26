@@ -981,6 +981,7 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     job_id,
                     f"[pdf] Starting batch translation ({os.path.basename(input_path)}, scan_policy={scan_policy})...\n",
                 )
+                low_mem = os.environ.get("MATHTRANSLATE_LOW_MEM", "").strip() in {"1", "true", "yes"}
                 runner = PdfBatchTranslator(
                     input_path,
                     output_path,
@@ -990,10 +991,11 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     l_to=l_to,
                     scan_policy=scan_policy,
                     glossary=glossary,
-                    max_workers=1 if engine == "google" else 2,
+                    max_workers=1 if (engine == "google" or low_mem) else 2,
                     translator_factory=custom_factory,
                     on_progress=_on_progress,
                     job_id=job_id,
+                    qa_sample_pages=8 if low_mem else 40,
                 )
                 _update_job(job_id, _pdf_translator=runner)
                 cp = runner.run()
