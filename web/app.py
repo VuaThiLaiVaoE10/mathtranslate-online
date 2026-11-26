@@ -789,11 +789,11 @@ def api_translate_pdf():
     stem = os.path.splitext(safe_name)[0]
     raw_page_range = str(request.form.get("page_range") or data.get("page_range") or "").strip()
     if raw_page_range:
-        m_range = re.match(r"^\s*(\d+)\s*(?:[-–:]\s*(\d+))?\s*$", raw_page_range)
-        if not m_range:
-            return jsonify({"error": "Invalid page_range. Use format like '1-50' or '12'."}), 400
-        p_start = int(m_range.group(1))
-        p_end = int(m_range.group(2) or p_start)
+        nums = re.findall(r"\d+", raw_page_range)
+        if not nums or len(nums) > 2:
+            return jsonify({"error": "Invalid page_range. Use format like '1-500' or '12'."}), 400
+        p_start = int(nums[0])
+        p_end = int(nums[1]) if len(nums) == 2 else p_start
         if p_start < 1 or p_end < p_start:
             return jsonify({"error": "Invalid page_range: start page must be >= 1 and <= end page."}), 400
         try:
@@ -1033,7 +1033,7 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                 low_mem = os.environ.get("MATHTRANSLATE_LOW_MEM", "").strip() in {"1", "true", "yes"}
                 expected_pages = int((job.get("progress") or {}).get("total_pages") or 0)
                 if low_mem:
-                    opt_workers = 1 if (engine == "google" or expected_pages > 80) else 2
+                    opt_workers = 1 if engine == "google" else 2
                 else:
                     cpu_workers = min(4, max(2, os.cpu_count() or 2))
                     opt_workers = 2 if engine == "google" else cpu_workers

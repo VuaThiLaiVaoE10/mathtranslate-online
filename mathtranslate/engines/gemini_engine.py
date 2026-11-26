@@ -30,7 +30,7 @@ class GeminiTranslator(BaseTranslator):
         base_url: Optional[str] = None,
         timeout: int = 60,
         temperature: float = 0.1,
-        min_interval: float = 0.25,
+        min_interval: float = 0.1,
         **_kwargs,
     ):
         resolved_key = (

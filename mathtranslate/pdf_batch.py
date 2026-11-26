@@ -1022,7 +1022,7 @@ class PdfBatchTranslator:
                             else:
                                 ckpt.eta_seconds = None
 
-                            partial_stride = 1 if len(batches) <= 20 else max(2, len(batches) // 10)
+                            partial_stride = 1 if len(batches) <= 15 else max(10, len(batches) // 4)
                             done_count = len(ckpt.completed_batches)
                             if (
                                 done_count == 1
