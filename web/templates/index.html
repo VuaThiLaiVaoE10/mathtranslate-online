@@ -147,6 +147,19 @@
                     </select>
                 </div>
 
+                <div id="api-key-field" class="field" hidden>
+                    <label for="api-key" class="field-label">API Key (Gemini / OpenAI / DeepL)</label>
+                    <input
+                        type="password"
+                        id="api-key"
+                        name="api_key"
+                        class="input-control input-mono"
+                        placeholder="Paste API key (e.g. AIza... from Google AI Studio)"
+                        autocomplete="off"
+                    >
+                    <p class="field-hint">Recommended for math-heavy PDFs: Gemini Flash preserves inline symbol positions and avoids free-scrape 429 limits.</p>
+                </div>
+
                 <div class="lang-grid">
                     <div class="field">
                         <label for="l-from" class="field-label">Source Language</label>

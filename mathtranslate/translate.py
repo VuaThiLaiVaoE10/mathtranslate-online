@@ -23,9 +23,13 @@ default_end = r'''
 
 
 class TextTranslator:
-    def __init__(self, engine, language_to, language_from):
+    def __init__(self, engine, language_to, language_from, **engine_kwargs):
         self.engine = engine
-        self.translator = create_engine(engine)
+        self.translator = (
+            create_engine(engine, **engine_kwargs)
+            if engine_kwargs
+            else create_engine(engine)
+        )
         self.try_translate = lambda text: self.translator.translate(text, self.language_to, self.language_from)
         self.language_to = language_to
         self.language_from = language_from

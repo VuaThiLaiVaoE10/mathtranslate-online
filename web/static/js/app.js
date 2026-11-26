@@ -37,6 +37,8 @@
     const pdfInspectSummary = document.getElementById("pdf-inspect-summary");
     const pdfGlossaryInput = document.getElementById("pdf-glossary");
     const engineSelect = document.getElementById("engine");
+    const apiKeyField = document.getElementById("api-key-field");
+    const apiKeyInput = document.getElementById("api-key");
     const lFromSelect = document.getElementById("l-from");
     const lToSelect = document.getElementById("l-to");
     const swapLangBtn = document.getElementById("swap-lang-btn");
@@ -507,6 +509,9 @@
 
         const formData = new FormData();
         formData.append("engine", engineSelect.value);
+        if (apiKeyInput && apiKeyInput.value.trim()) {
+            formData.append("api_key", apiKeyInput.value.trim());
+        }
         formData.append("l_from", lFromSelect.value);
         formData.append("l_to", lToSelect.value);
         formData.append("compile_pdf", compilePdfInput.checked ? "true" : "false");
@@ -681,6 +686,19 @@
     if (pdfInput && pdfFilename) {
         setupDropzone("pdf", pdfInput, pdfFilename, ".pdf", "or drop a PDF here");
     }
+    function syncApiKeyVisibility() {
+        if (!apiKeyField || !engineSelect) {
+            return;
+        }
+        const needsKey = ["gemini", "openai", "deepl"].includes(engineSelect.value);
+        apiKeyField.hidden = !needsKey;
+    }
+
+    if (engineSelect) {
+        engineSelect.addEventListener("change", syncApiKeyVisibility);
+    }
+
     form.addEventListener("submit", handleSubmit);
-    hydrateMeta();
+    hydrateMeta().then(syncApiKeyVisibility);
+    syncApiKeyVisibility();
 })();

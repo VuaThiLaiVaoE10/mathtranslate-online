@@ -24,7 +24,7 @@ from mathtranslate import __version__
 from mathtranslate.engines import AVAILABLE_ENGINES
 from mathtranslate.pdf_batch import BatchCheckpoint, PdfBatchTranslator, inspect_pdf
 from mathtranslate.pdf_compiler import compile_tex_to_pdf, compile_zip_to_pdf
-from mathtranslate.translate import translate_single_tex_file
+from mathtranslate.translate import TextTranslator, translate_single_tex_file
 from mathtranslate.translate_arxiv import (
     main as translate_arxiv_main,
     translate_zip_project,
@@ -171,11 +171,13 @@ def _validate_translation_params() -> tuple[dict[str, Any] | None, tuple[Any, in
         return None, (jsonify({"error": f"Unsupported target language code '{l_to}'."}), 400)
 
     compile_pdf = _parse_bool(_get_payload_field("compile_pdf", False), default=False)
+    api_key = str(_get_payload_field("api_key", "") or "").strip() or None
     return {
         "engine": engine,
         "l_from": l_from,
         "l_to": l_to,
         "compile_pdf": compile_pdf,
+        "api_key": api_key,
     }, None
 
 
@@ -255,6 +257,7 @@ def _create_job(mode: str, params: dict[str, Any]) -> tuple[str, str, str]:
         "_input_path": None,
         "_output_filename": None,
         "_pdf_translator": None,
+        "_api_key": params.get("api_key"),
     }
     with JOBS_LOCK:
         JOBS[job_id] = record
@@ -938,9 +941,15 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
         l_from = job["l_from"]
         l_to = job["l_to"]
         existing_runner = job.get("_pdf_translator")
+        api_key = job.get("_api_key")
 
     _update_job(job_id, status="running", error=None)
     output_path = os.path.join(output_dir, output_filename)
+    custom_factory = (
+        (lambda: TextTranslator(engine, l_to, l_from, api_key=api_key))
+        if api_key
+        else None
+    )
 
     def _on_progress(cp: Any) -> None:
         progress, overflow_pages, scan_pages = _checkpoint_to_progress(cp)
@@ -962,6 +971,7 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                 _append_log(job_id, "[pdf] Resuming PDF batch translation from checkpoint...\n")
                 runner = PdfBatchTranslator.from_checkpoint(
                     output_dir,
+                    translator_factory=custom_factory,
                     on_progress=_on_progress,
                 )
                 _update_job(job_id, _pdf_translator=runner)
@@ -980,6 +990,7 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     l_to=l_to,
                     scan_policy=scan_policy,
                     glossary=glossary,
+                    translator_factory=custom_factory,
                     on_progress=_on_progress,
                     job_id=job_id,
                 )
@@ -1115,8 +1126,8 @@ def run_server(host: str | None = None, port: int | None = None) -> None:
     parser.add_argument(
         "--port",
         type=int,
-        default=port or int(os.environ.get("MATHTRANSLATE_PORT", "5000")),
-        help="TCP port to listen on (default: 5000).",
+        default=port or int(os.environ.get("MATHTRANSLATE_PORT") or os.environ.get("PORT") or "5000"),
+        help="TCP port to listen on (default: 5000 or $PORT).",
     )
     args, _ = parser.parse_known_args()
     _ensure_jobs_root()
