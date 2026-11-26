@@ -33,4 +33,5 @@ where = ["."]
 include = ["mathtranslate*", "web*", "gui*"]
 
 [tool.setuptools.package-data]
-mathtranslate = ["version.txt", "author.txt"]
+mathtranslate = ["*.txt"]
+web = ["templates/*.html", "static/css/*.css", "static/js/*.js", "*.md"]

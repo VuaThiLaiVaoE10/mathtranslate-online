@@ -12,7 +12,7 @@ COPY mathtranslate ./mathtranslate
 COPY web ./web
 COPY gui ./gui
 
-RUN pip install --no-cache-dir ".[web,pdf]" \
+RUN pip install --no-cache-dir -e ".[web,pdf]" \
     && chown -R appuser:appuser /app
 
 USER appuser
