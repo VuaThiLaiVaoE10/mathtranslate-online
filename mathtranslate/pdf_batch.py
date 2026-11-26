@@ -546,6 +546,7 @@ class PdfBatchTranslator:
         max_retries: int = 4,
         base_backoff: float = 0.5,
         on_progress: Callable[[BatchCheckpoint], None] | None = None,
+        on_page_progress: Callable[[BatchCheckpoint], None] | None = None,
         job_id: str | None = None,
         run_qa: bool = True,
         qa_sample_pages: int | None = 40,
@@ -574,6 +575,7 @@ class PdfBatchTranslator:
         self.max_retries = max(0, int(max_retries))
         self.base_backoff = max(0.0, float(base_backoff))
         self.on_progress = on_progress
+        self.on_page_progress = on_page_progress
         self.job_id = job_id or hashlib.sha1(f"{self.input_path}:{time.time()}".encode("utf-8")).hexdigest()[:12]
         self.run_qa = bool(run_qa)
         self.qa_sample_pages = qa_sample_pages
@@ -765,6 +767,7 @@ class PdfBatchTranslator:
         translator: Any = None,
         translator_factory: Callable[[], Any] | None = None,
         on_progress: Callable[[BatchCheckpoint], None] | None = None,
+        on_page_progress: Callable[[BatchCheckpoint], None] | None = None,
         max_workers: int | None = None,
     ) -> PdfBatchTranslator:
         """Reload persisted checkpoint configuration and TM path across process restarts."""
@@ -794,6 +797,7 @@ class PdfBatchTranslator:
             translator=translator,
             translator_factory=translator_factory,
             on_progress=on_progress,
+            on_page_progress=on_page_progress,
             job_id=ckpt.job_id,
             run_qa=ckpt.run_qa,
             qa_sample_pages=ckpt.qa_sample_pages,
@@ -903,6 +907,31 @@ class PdfBatchTranslator:
         def _tm_store(src: str, translated: str) -> None:
             tm.store(src, translated, self.glossary_hash, self.engine, self.l_from, self.l_to)
 
+        in_flight_done_pages: set[int] = set()
+
+        def _on_page_done(pno: int) -> None:
+            cb = self.on_page_progress
+            if cb is None:
+                return
+            ckpt_snapshot: BatchCheckpoint | None = None
+            with self._assembly_lock:
+                in_flight_done_pages.add(pno)
+                live_comp = sorted(set(ckpt.completed_pages) | in_flight_done_pages)
+                live_pending = [p for p in range(total_pages) if p not in live_comp]
+                live_elapsed = max(1e-6, time.monotonic() - session_start)
+                live_done_cnt = len(in_flight_done_pages)
+                live_speed = round(live_done_cnt / live_elapsed, 4)
+                ckpt_snapshot = copy.deepcopy(ckpt)
+                ckpt_snapshot.completed_pages = live_comp
+                ckpt_snapshot.pending_pages = live_pending
+                ckpt_snapshot.elapsed_seconds = round(prior_elapsed + live_elapsed, 3)
+                ckpt_snapshot.pages_per_sec = live_speed
+                ckpt_snapshot.eta_seconds = (
+                    round(len(live_pending) / live_speed, 2) if live_speed > 0 else None
+                )
+            if ckpt_snapshot is not None:
+                cb(ckpt_snapshot)
+
         def _run_batch(b_idx: int) -> tuple[int, list[int], list[int], list[int]]:
             if self._cancel_event.is_set():
                 raise BatchCancelledError("Batch translation cancelled")
@@ -922,6 +951,7 @@ class PdfBatchTranslator:
                     cache_lookup=_tm_lookup,
                     cache_store=_tm_store,
                     cancel_check=self._cancel_event.is_set,
+                    on_page_done=_on_page_done,
                 )
                 if self._cancel_event.is_set():
                     raise BatchCancelledError("Batch translation cancelled")

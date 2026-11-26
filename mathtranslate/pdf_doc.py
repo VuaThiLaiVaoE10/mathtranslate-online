@@ -1070,6 +1070,7 @@ def translate_pdf_pages_in_doc(
     cache_lookup: Callable[[str], str | None] | None = None,
     cache_store: Callable[[str, str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    on_page_done: Callable[[int], None] | None = None,
 ) -> tuple[list[PageTranslationStats], list[int]]:
     """Translate `page_indices` in-place inside `doc`, preserving vector math, images, links, and TOC."""
     base_arch, font_css = _build_font_archive_and_css()
@@ -1253,6 +1254,11 @@ def translate_pdf_pages_in_doc(
                 min_scale_used=round(min_scale_seen, 3),
             )
         )
+        if on_page_done is not None:
+            try:
+                on_page_done(pno)
+            except Exception:
+                pass
 
     return stats_list, flagged_pages
 

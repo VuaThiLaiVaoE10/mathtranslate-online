@@ -827,6 +827,16 @@ body {
     transition: width 0.25s ease;
 }
 
+.progress-fill.is-indeterminate {
+    width: 30% !important;
+    animation: progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
+}
+
 .pdf-controls-row {
     display: flex;
     flex-wrap: wrap;

@@ -825,12 +825,24 @@ def api_translate_pdf():
     _update_job(job_id, _input_path=input_path, _output_filename=output_filename)
 
     cached_info = None
-    if upload_id and not raw_page_range:
+    if upload_id:
         cache_file = os.path.join(_ensure_jobs_root(), f"upload_{upload_id}", "inspect_cache.json")
         if os.path.isfile(cache_file):
             try:
                 with open(cache_file, "r", encoding="utf-8") as cf:
-                    cached_info = json.load(cf)
+                    raw_cached = json.load(cf)
+                if raw_page_range:
+                    sliced_scans = [
+                        p - (p_start - 1)
+                        for p in (raw_cached.get("scan_pages") or [])
+                        if (p_start - 1) <= p <= (p_end - 1)
+                    ]
+                    cached_info = {
+                        "total_pages": p_end - p_start + 1,
+                        "scan_pages": sliced_scans,
+                    }
+                else:
+                    cached_info = raw_cached
             except Exception:
                 cached_info = None
 
@@ -1022,6 +1034,7 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     output_dir,
                     translator_factory=custom_factory,
                     on_progress=_on_progress,
+                    on_page_progress=_on_progress,
                 )
                 _update_job(job_id, _pdf_translator=runner)
                 cp = runner.resume()
@@ -1051,6 +1064,7 @@ def _run_pdf_job(job_id: str, *, resume: bool = False) -> None:
                     base_backoff=2.0 if engine == "gemini" else 0.5,
                     translator_factory=custom_factory,
                     on_progress=_on_progress,
+                    on_page_progress=_on_progress,
                     job_id=job_id,
                     qa_sample_pages=8 if low_mem else 40,
                 )

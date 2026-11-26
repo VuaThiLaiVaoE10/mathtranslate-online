@@ -90,6 +90,7 @@
     let pollTimer = null;
     let activeJobId = null;
     let inspectedUploadId = null;
+    let inspectPromise = null;
     let pollFailures = 0;
 
     function formatBytes(bytes) {
@@ -270,38 +271,80 @@
         return Object.keys(glossary).length > 0 ? glossary : null;
     }
 
+    function uploadFormDataWithProgress(url, formData, onProgress) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", url, true);
+            xhr.setRequestHeader("Accept", "application/json");
+            xhr.upload.onprogress = (evt) => {
+                if (evt.lengthComputable && typeof onProgress === "function") {
+                    const pct = Math.min(100, Math.round((evt.loaded / evt.total) * 100));
+                    onProgress(pct, evt.loaded, evt.total);
+                }
+            };
+            xhr.onload = () => {
+                let data = null;
+                try {
+                    data = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+                } catch (_) {
+                    data = {};
+                }
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve(data);
+                } else {
+                    reject(new Error((data && data.error) || `Request failed (${xhr.status})`));
+                }
+            };
+            xhr.onerror = () => reject(new Error("Network error while uploading file."));
+            xhr.onabort = () => reject(new Error("Upload cancelled."));
+            xhr.send(formData);
+        });
+    }
+
     async function inspectSelectedPdf(file) {
         inspectedUploadId = null;
         if (!file || !pdfInspectBox || !pdfInspectSummary) {
-            return;
+            return null;
         }
         pdfInspectBox.hidden = false;
-        pdfInspectSummary.textContent = "Inspecting PDF pages and terminology...";
+        pdfInspectSummary.textContent = `Uploading & inspecting ${file.name} (${formatBytes(file.size)})...`;
         const fd = new FormData();
         fd.append("file", file);
-        try {
-            const resp = await fetch("/api/pdf/inspect", { method: "POST", body: fd });
-            const info = await resp.json();
-            if (!resp.ok) {
-                throw new Error(info.error || "Inspection failed");
-            }
-            inspectedUploadId = info.upload_id || null;
-            const counts = info.counts || {};
-            const scanPages = info.scan_pages || [];
-            const scanText = scanPages.length > 0
-                ? `Scan pages detected (no auto-OCR): ${scanPages.join(", ")}`
-                : "No scanned pages detected.";
-            pdfInspectSummary.textContent =
-                `Pages: ${info.total_pages || 0} (TEXT: ${counts.TEXT || 0}, SCAN: ${counts.SCAN || 0}, MIXED: ${counts.MIXED || 0}). ${scanText}`;
-            if (pdfGlossaryInput && !pdfGlossaryInput.value.trim()) {
-                const merged = Object.assign({}, info.default_glossary || {});
-                if (Object.keys(merged).length > 0) {
-                    pdfGlossaryInput.value = JSON.stringify(merged, null, 2);
+        const p = (async () => {
+            try {
+                const info = await uploadFormDataWithProgress("/api/pdf/inspect", fd, (pct) => {
+                    if (pct < 100) {
+                        pdfInspectSummary.textContent = `Uploading ${file.name}: ${pct}%...`;
+                    } else {
+                        pdfInspectSummary.textContent = "Inspecting PDF pages on server...";
+                    }
+                });
+                inspectedUploadId = info.upload_id || null;
+                const counts = info.counts || {};
+                const scanPages = info.scan_pages || [];
+                const scanText = scanPages.length > 0
+                    ? `Scan pages detected (no auto-OCR): ${scanPages.join(", ")}`
+                    : "No scanned pages detected.";
+                pdfInspectSummary.textContent =
+                    `Pages: ${info.total_pages || 0} (TEXT: ${counts.TEXT || 0}, SCAN: ${counts.SCAN || 0}, MIXED: ${counts.MIXED || 0}). ${scanText}`;
+                if (pdfGlossaryInput && !pdfGlossaryInput.value.trim()) {
+                    const merged = Object.assign({}, info.default_glossary || {});
+                    if (Object.keys(merged).length > 0) {
+                        pdfGlossaryInput.value = JSON.stringify(merged, null, 2);
+                    }
+                }
+                return inspectedUploadId;
+            } catch (err) {
+                pdfInspectSummary.textContent = `Inspection warning: ${err.message}`;
+                return null;
+            } finally {
+                if (inspectPromise === p) {
+                    inspectPromise = null;
                 }
             }
-        } catch (err) {
-            pdfInspectSummary.textContent = `Inspection warning: ${err.message}`;
-        }
+        })();
+        inspectPromise = p;
+        return p;
     }
 
     function renderJob(job) {
@@ -360,7 +403,13 @@
                 const pct = Number.isFinite(prog.percent) ? prog.percent : 0;
                 pdfProgressPages.textContent = `${completed} / ${total} pages (${pct.toFixed(1)}%)`;
                 pdfProgressEta.textContent = formatEta(prog.eta_seconds);
-                pdfProgressBar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+                if (completed === 0) {
+                    pdfProgressBar.classList.add("is-indeterminate");
+                    pdfProgressBar.style.width = "30%";
+                } else {
+                    pdfProgressBar.classList.remove("is-indeterminate");
+                    pdfProgressBar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+                }
 
                 const overflow = job.overflow_pages || [];
                 if (overflow.length > 0) {
@@ -591,26 +640,50 @@
 
         stopPolling();
         setBusy(true);
+        setPanelState("running", activeMode === "pdf" ? "Preparing" : "Uploading");
+        runningSummary.textContent = "Uploading & preparing job on server...";
+        if (pdfProgressBox && activeMode === "pdf") {
+            pdfProgressBox.hidden = false;
+            pdfProgressPages.textContent = "Preparing PDF...";
+            pdfProgressEta.textContent = "ETA: --";
+            pdfProgressBar.classList.add("is-indeterminate");
+            pdfProgressBar.style.width = "30%";
+        }
 
         try {
-            const response = await fetch(MODE_ENDPOINTS[activeMode], {
-                method: "POST",
-                body: formData,
-            });
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || `Request failed (${response.status})`);
+            if (activeMode === "pdf" && !inspectedUploadId && inspectPromise) {
+                runningSummary.textContent = "Finishing PDF pre-flight upload...";
+                const resolvedId = await inspectPromise;
+                if (resolvedId) {
+                    formData.delete("file");
+                    formData.set("upload_id", resolvedId);
+                }
             }
+
+            const data = await uploadFormDataWithProgress(MODE_ENDPOINTS[activeMode], formData, (pct) => {
+                runningSummary.textContent = pct < 100 ? `Uploading file (${pct}%)...` : "Starting translation job on server...";
+                if (pdfProgressBox && activeMode === "pdf" && pct < 100) {
+                    pdfProgressPages.textContent = `Uploading: ${pct}%`;
+                    pdfProgressBar.classList.remove("is-indeterminate");
+                    pdfProgressBar.style.width = `${pct}%`;
+                }
+            });
 
             activeJobId = data.job_id;
             jobIdBadge.textContent = `job:${activeJobId}`;
             jobIdBadge.hidden = false;
             setPanelState("running", "Queued");
             runningSummary.textContent = "Job submitted. Waiting for live output...";
+            if (pdfProgressBox && activeMode === "pdf") {
+                pdfProgressBar.classList.add("is-indeterminate");
+                pdfProgressPages.textContent = "Starting batch 1...";
+            }
             jobLog.textContent = "";
             pollJob(activeJobId);
         } catch (err) {
             setBusy(false);
+            setPanelState("error", "Failed");
+            errorSummary.textContent = err.message || "Unable to submit translation request.";
             showFormError(err.message || "Unable to submit translation request.");
         }
     }
